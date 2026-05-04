@@ -5,6 +5,8 @@ import type {
   Command,
   Connector,
   ConnectorStatus,
+  Preview,
+  PreviewStatus,
   User,
 } from "@surveillance/shared";
 import { getPool, withTx } from "./client.js";
@@ -62,6 +64,9 @@ export interface Store {
   createCamera(camera: Camera): Promise<Camera>;
   listCamerasForOrg(organizationId: string): Promise<Camera[]>;
   getCamera(id: string): Promise<Camera | null>;
+  // Org-scoped lookup for operator-driven actions on a camera. Returns null
+  // if the camera doesn't exist OR belongs to a different org.
+  getCameraForOrg(id: string, organizationId: string): Promise<Camera | null>;
   updateCameraValidation(input: {
     id: string;
     state: CameraState;
@@ -77,6 +82,20 @@ export interface Store {
     commandId: string;
     result: unknown;
   }): Promise<CommandRowRef | null>;
+
+  // HLS preview sessions.
+  createPreview(input: {
+    cameraId: string;
+    maxDurationSeconds: number;
+  }): Promise<Preview>;
+  getActivePreviewForCamera(cameraId: string): Promise<Preview | null>;
+  getPreviewById(id: string): Promise<Preview | null>;
+  // Verifies the preview exists and belongs to a camera owned by this connector.
+  // Used by the connector HLS upload route to authorize each PUT.
+  getPreviewForConnector(previewId: string, connectorId: string): Promise<Preview | null>;
+  setPreviewStatus(id: string, status: PreviewStatus, errorMessage?: string): Promise<void>;
+  endPreview(id: string, errorMessage?: string): Promise<void>;
+  recordPreviewHeartbeat(id: string): Promise<boolean>;
 
   // Operator auth (dashboard).
   findUserByEmail(email: string): Promise<User | null>;
@@ -170,6 +189,30 @@ function rowToCamera(row: CameraRow): Camera {
     state: row.state,
     lastValidatedAt: row.last_validated_at?.toISOString() ?? null,
     lastSnapshotKey: row.last_snapshot_key,
+    errorMessage: row.error_message,
+  };
+}
+
+interface PreviewRow {
+  id: string;
+  camera_id: string;
+  status: PreviewStatus;
+  max_duration_seconds: number;
+  started_at: Date;
+  last_heartbeat_at: Date;
+  ended_at: Date | null;
+  error_message: string | null;
+}
+
+function rowToPreview(row: PreviewRow): Preview {
+  return {
+    id: row.id,
+    cameraId: row.camera_id,
+    status: row.status,
+    maxDurationSeconds: row.max_duration_seconds,
+    startedAt: row.started_at.toISOString(),
+    lastHeartbeatAt: row.last_heartbeat_at.toISOString(),
+    endedAt: row.ended_at?.toISOString() ?? null,
     errorMessage: row.error_message,
   };
 }
@@ -372,6 +415,18 @@ export function createStore(databaseUrl: string): Store {
       return rows[0] ? rowToCamera(rows[0]) : null;
     },
 
+    async getCameraForOrg(id, organizationId) {
+      const { rows } = await pool.query<CameraRow>(
+        `SELECT c.id, c.connector_id, c.label, c.rtsp_url, c.state,
+                c.last_validated_at, c.last_snapshot_key, c.error_message
+           FROM cameras c
+           JOIN connectors n ON n.id = c.connector_id
+          WHERE c.id = $1 AND n.organization_id = $2`,
+        [id, organizationId],
+      );
+      return rows[0] ? rowToCamera(rows[0]) : null;
+    },
+
     async updateCameraValidation(input) {
       await pool.query(
         `UPDATE cameras
@@ -435,6 +490,82 @@ export function createStore(databaseUrl: string): Store {
           kind: row.kind,
         };
       });
+    },
+
+    async createPreview({ cameraId, maxDurationSeconds }) {
+      const { rows } = await pool.query<PreviewRow>(
+        `INSERT INTO previews (camera_id, max_duration_seconds)
+         VALUES ($1, $2)
+         RETURNING id, camera_id, status, max_duration_seconds,
+                   started_at, last_heartbeat_at, ended_at, error_message`,
+        [cameraId, maxDurationSeconds],
+      );
+      return rowToPreview(rows[0]!);
+    },
+
+    async getActivePreviewForCamera(cameraId) {
+      const { rows } = await pool.query<PreviewRow>(
+        `SELECT id, camera_id, status, max_duration_seconds,
+                started_at, last_heartbeat_at, ended_at, error_message
+           FROM previews
+          WHERE camera_id = $1 AND ended_at IS NULL
+          LIMIT 1`,
+        [cameraId],
+      );
+      return rows[0] ? rowToPreview(rows[0]) : null;
+    },
+
+    async getPreviewById(id) {
+      const { rows } = await pool.query<PreviewRow>(
+        `SELECT id, camera_id, status, max_duration_seconds,
+                started_at, last_heartbeat_at, ended_at, error_message
+           FROM previews WHERE id = $1`,
+        [id],
+      );
+      return rows[0] ? rowToPreview(rows[0]) : null;
+    },
+
+    async getPreviewForConnector(previewId, connectorId) {
+      const { rows } = await pool.query<PreviewRow>(
+        `SELECT p.id, p.camera_id, p.status, p.max_duration_seconds,
+                p.started_at, p.last_heartbeat_at, p.ended_at, p.error_message
+           FROM previews p
+           JOIN cameras c ON c.id = p.camera_id
+          WHERE p.id = $1 AND c.connector_id = $2`,
+        [previewId, connectorId],
+      );
+      return rows[0] ? rowToPreview(rows[0]) : null;
+    },
+
+    async setPreviewStatus(id, status, errorMessage) {
+      await pool.query(
+        `UPDATE previews
+            SET status = $2,
+                error_message = COALESCE($3, error_message)
+          WHERE id = $1`,
+        [id, status, errorMessage ?? null],
+      );
+    },
+
+    async endPreview(id, errorMessage) {
+      await pool.query(
+        `UPDATE previews
+            SET status = $2,
+                ended_at = now(),
+                error_message = COALESCE($3, error_message)
+          WHERE id = $1 AND ended_at IS NULL`,
+        [id, errorMessage ? "failed" : "ended", errorMessage ?? null],
+      );
+    },
+
+    async recordPreviewHeartbeat(id) {
+      const { rowCount } = await pool.query(
+        `UPDATE previews
+            SET last_heartbeat_at = now()
+          WHERE id = $1 AND ended_at IS NULL`,
+        [id],
+      );
+      return (rowCount ?? 0) > 0;
     },
 
     async findUserByEmail(email) {

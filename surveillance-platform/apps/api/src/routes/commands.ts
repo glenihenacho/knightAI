@@ -38,6 +38,13 @@ export function registerCommandRoutes(app: FastifyInstance, store: Store): void 
       });
     }
 
+    // If the connector failed to start a preview, mark the active session as
+    // failed so the dashboard can surface the error and stop polling.
+    if (ref.kind === "start_preview" && result.status !== "ok" && ref.cameraId) {
+      const active = await store.getActivePreviewForCamera(ref.cameraId);
+      if (active) await store.endPreview(active.id, result.errorMessage ?? "connector reported failure");
+    }
+
     return reply.code(204).send();
   });
 }

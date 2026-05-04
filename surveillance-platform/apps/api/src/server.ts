@@ -15,6 +15,7 @@ import { registerCommandRoutes } from "./routes/commands.js";
 import { registerUploadRoutes } from "./routes/uploads.js";
 import { registerOrganizationRoutes } from "./routes/organizations.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerPreviewRoutes } from "./routes/previews.js";
 
 async function main() {
   const env = loadEnv();
@@ -29,9 +30,16 @@ async function main() {
   await app.register(cookie);
   await app.register(multipart, { limits: { fileSize: 25 * 1024 * 1024 } });
 
-  // Snapshot uploads stream raw image bytes; bypass body parsing so the route handler can read req.raw.
+  // Snapshot + HLS uploads stream raw bytes; bypass body parsing so the route
+  // handler can read req.raw. m3u8 is text but we treat it as an opaque blob.
   app.addContentTypeParser(
-    ["image/jpeg", "image/png", "application/octet-stream"],
+    [
+      "image/jpeg",
+      "image/png",
+      "application/octet-stream",
+      "video/mp2t",
+      "application/vnd.apple.mpegurl",
+    ],
     (_req, _payload, done) => done(null),
   );
 
@@ -59,6 +67,7 @@ async function main() {
   registerCameraRoutes(app, store);
   registerCommandRoutes(app, store);
   registerUploadRoutes(app, store, storage);
+  registerPreviewRoutes(app, store, storage, env);
 
   await app.listen({ port: env.PORT, host: "0.0.0.0" });
   app.log.info(`api listening on :${env.PORT}`);

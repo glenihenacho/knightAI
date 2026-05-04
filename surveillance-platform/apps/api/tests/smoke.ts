@@ -52,41 +52,65 @@ async function wipeDb() {
   await client.end();
 }
 
+interface StubObject {
+  body: Buffer;
+  contentType: string;
+}
+
 interface S3Stub {
   putCount: number;
-  lastBody: Buffer | null;
+  /** Keyed by S3 object key (path-style: /<bucket>/<key>). */
+  objects: Map<string, StubObject>;
+  /** Last PUT key, for tests that just want "where did the last upload land". */
   lastKey: string | null;
+  /** Last PUT body, retained for compatibility with the snapshot path. */
+  lastBody: Buffer | null;
   close(): Promise<void>;
+}
+
+function pathOnly(url: string | undefined): string {
+  return (url ?? "").split("?")[0] ?? "";
 }
 
 function startS3Stub(): Promise<S3Stub> {
   return new Promise((resolve) => {
     const stub: S3Stub = {
       putCount: 0,
-      lastBody: null,
+      objects: new Map(),
       lastKey: null,
+      lastBody: null,
       close: () => new Promise((res) => server.close(() => res())),
     };
     const server = createServer(async (req, res) => {
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(chunk as Buffer);
       const body = Buffer.concat(chunks);
+      const key = pathOnly(req.url);
       if (req.method === "PUT") {
         stub.putCount += 1;
-        stub.lastBody = body;
         stub.lastKey = req.url ?? null;
+        stub.lastBody = body;
+        stub.objects.set(key, {
+          body,
+          contentType:
+            (req.headers["content-type"] as string | undefined) ?? "application/octet-stream",
+        });
         res.writeHead(200, { ETag: '"deadbeef"' });
         res.end();
         return;
       }
       if (req.method === "GET") {
-        if (stub.lastBody && req.url?.includes(stub.lastKey?.split("?")[0] ?? "")) {
-          res.writeHead(200, { "content-type": "image/jpeg" });
-          res.end(stub.lastBody);
+        const obj = stub.objects.get(key);
+        if (!obj) {
+          res.writeHead(404);
+          res.end();
           return;
         }
-        res.writeHead(404);
-        res.end();
+        res.writeHead(200, {
+          "content-type": obj.contentType,
+          "content-length": String(obj.body.length),
+        });
+        res.end(obj.body);
         return;
       }
       res.writeHead(405);
@@ -349,6 +373,188 @@ async function main() {
     check("snapshot redirect 302", snapRes.status === 302);
     const snapLoc = snapRes.headers.get("location") ?? "";
     check("signed URL has X-Amz-Signature", snapLoc.includes("X-Amz-Signature="));
+
+    // ===== M3: HLS preview pipeline =====
+    // Start a preview session on the just-validated camera.
+    const startPrev1 = await fetch(`${API}/v1/cameras/${camera.id}/preview`, {
+      method: "POST",
+      headers: { cookie: cookieHeader },
+    });
+    check("POST preview start 201", startPrev1.status === 201);
+    const prev1 = await startPrev1.json();
+    check("preview returned with id and manifestUrl",
+      typeof prev1.preview?.id === "string" && typeof prev1.manifestUrl === "string");
+    check("preview status starts as 'starting'", prev1.preview.status === "starting");
+
+    // Idempotent re-call returns the same session.
+    const startPrev2 = await fetch(`${API}/v1/cameras/${camera.id}/preview`, {
+      method: "POST",
+      headers: { cookie: cookieHeader },
+    });
+    const prev2 = await startPrev2.json();
+    check("second start returns same preview id", prev2.preview.id === prev1.preview.id);
+
+    // Manifest 404 before any upload.
+    const earlyManifest = await fetch(prev1.manifestUrl);
+    check("manifest 404 before connector upload", earlyManifest.status === 404);
+
+    // Connector should now see a start_preview command.
+    const startCmdRes = await fetch(`${API}/v1/connectors/commands/next`, { headers: auth });
+    check("connector poll returns start_preview", startCmdRes.status === 200);
+    const startCmd = await startCmdRes.json();
+    check("command kind is start_preview", startCmd.kind === "start_preview");
+    check("payload has previewId matching", startCmd.payload.previewId === prev1.preview.id);
+    check("payload has rtspUrl + maxDurationSeconds + segmentSeconds + windowSegments",
+      typeof startCmd.payload.rtspUrl === "string"
+        && typeof startCmd.payload.maxDurationSeconds === "number"
+        && typeof startCmd.payload.segmentSeconds === "number"
+        && typeof startCmd.payload.windowSegments === "number");
+
+    // Cross-connector HLS upload is rejected (foreign connector trying to push to this preview).
+    const fakeManifest =
+      "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg-0001.ts\n#EXTINF:2.0,\nseg-0002.ts\n";
+    // (no second connector in this test; just upload a manifest from the legit connector).
+    const manifestUpRes = await fetch(
+      `${API}/v1/connectors/hls/${prev1.preview.id}/playlist.m3u8`,
+      {
+        method: "PUT",
+        headers: { ...auth, "content-type": "application/vnd.apple.mpegurl" },
+        body: fakeManifest,
+      },
+    );
+    check("connector PUTs manifest 204", manifestUpRes.status === 204);
+    check("S3 stub got manifest under hls/<camera>/<preview>/", s3.lastKey?.includes(`/hls/${camera.id}/${prev1.preview.id}/playlist.m3u8`) === true, s3.lastKey);
+
+    // Now segments.
+    const fakeSegment = Buffer.alloc(256, 0xab);
+    const seg1Res = await fetch(
+      `${API}/v1/connectors/hls/${prev1.preview.id}/seg-0001.ts`,
+      {
+        method: "PUT",
+        headers: { ...auth, "content-type": "video/mp2t" },
+        body: fakeSegment,
+      },
+    );
+    check("connector PUTs segment 204", seg1Res.status === 204);
+    const seg2Res = await fetch(
+      `${API}/v1/connectors/hls/${prev1.preview.id}/seg-0002.ts`,
+      {
+        method: "PUT",
+        headers: { ...auth, "content-type": "video/mp2t" },
+        body: fakeSegment,
+      },
+    );
+    check("connector PUTs second segment 204", seg2Res.status === 204);
+
+    // Filename validation: no traversal, no unexpected names.
+    const badFilenameRes = await fetch(
+      `${API}/v1/connectors/hls/${prev1.preview.id}/..%2Fevil`,
+      { method: "PUT", headers: { ...auth, "content-type": "video/mp2t" }, body: fakeSegment },
+    );
+    check("HLS upload rejects path-traversal filename", badFilenameRes.status === 400);
+
+    // Manifest now serves with rewritten segment URLs.
+    const manifestRes = await fetch(prev1.manifestUrl);
+    check("manifest 200 after upload", manifestRes.status === 200);
+    check(
+      "manifest content-type is mpegurl",
+      manifestRes.headers.get("content-type")?.includes("application/vnd.apple.mpegurl") === true,
+    );
+    const manifestBody = await manifestRes.text();
+    check("manifest preserves #EXTM3U header", manifestBody.startsWith("#EXTM3U"));
+    check(
+      "manifest rewrites seg-0001.ts to API path",
+      manifestBody.includes(`/v1/previews/${prev1.preview.id}/seg/seg-0001.ts`),
+    );
+    check(
+      "manifest rewrites seg-0002.ts too",
+      manifestBody.includes(`/v1/previews/${prev1.preview.id}/seg/seg-0002.ts`),
+    );
+
+    // Segment proxy serves the bytes back.
+    const segGetRes = await fetch(`${API}/v1/previews/${prev1.preview.id}/seg/seg-0001.ts`);
+    check("segment GET 200", segGetRes.status === 200);
+    check(
+      "segment content-type is mp2t",
+      (segGetRes.headers.get("content-type") ?? "").includes("video/mp2t"),
+    );
+    const segBytes = Buffer.from(await segGetRes.arrayBuffer());
+    check("segment bytes match upload", segBytes.equals(fakeSegment));
+
+    // Heartbeat works while the session is live.
+    const hb1 = await fetch(`${API}/v1/previews/${prev1.preview.id}/heartbeat`, {
+      method: "POST",
+      headers: { cookie: cookieHeader },
+    });
+    check("heartbeat 204", hb1.status === 204);
+
+    // Connector submits the start_preview command result.
+    await fetch(`${API}/v1/connectors/commands/${startCmd.id}/result`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: startCmd.id,
+        status: "ok",
+        durationMs: 50,
+        finishedAt: new Date().toISOString(),
+        startPreview: { startedAt: new Date().toISOString() },
+      }),
+    });
+
+    // Operator stops the preview.
+    const stopRes = await fetch(`${API}/v1/cameras/${camera.id}/preview`, {
+      method: "DELETE",
+      headers: { cookie: cookieHeader },
+    });
+    check("DELETE preview 204", stopRes.status === 204);
+
+    // Connector should now see a stop_preview command for the same preview.
+    const stopCmdRes = await fetch(`${API}/v1/connectors/commands/next`, { headers: auth });
+    check("connector poll returns stop_preview", stopCmdRes.status === 200);
+    const stopCmd = await stopCmdRes.json();
+    check("stop_preview targets the right previewId",
+      stopCmd.kind === "stop_preview" && stopCmd.payload.previewId === prev1.preview.id);
+
+    // Heartbeat after end → 409.
+    const hb2 = await fetch(`${API}/v1/previews/${prev1.preview.id}/heartbeat`, {
+      method: "POST",
+      headers: { cookie: cookieHeader },
+    });
+    check("heartbeat after end 409", hb2.status === 409);
+
+    // ===== M3: start_preview failure path =====
+    const startPrevFail = await fetch(`${API}/v1/cameras/${camera.id}/preview`, {
+      method: "POST",
+      headers: { cookie: cookieHeader },
+    });
+    check("second preview start 201 (after first ended)", startPrevFail.status === 201);
+    const prevFail = await startPrevFail.json();
+
+    // Connector pulls + submits failure
+    const failCmdRes = await fetch(`${API}/v1/connectors/commands/next`, { headers: auth });
+    const failCmd = await failCmdRes.json();
+    await fetch(`${API}/v1/connectors/commands/${failCmd.id}/result`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: failCmd.id,
+        status: "failed",
+        durationMs: 10,
+        finishedAt: new Date().toISOString(),
+        errorMessage: "ffmpeg not found",
+      }),
+    });
+    // Preview should now be ended with status=failed.
+    const sql2 = new Client({ connectionString: DATABASE_URL });
+    await sql2.connect();
+    const failRow = await sql2.query<{ status: string; ended_at: Date | null; error_message: string | null }>(
+      "SELECT status, ended_at, error_message FROM previews WHERE id = $1",
+      [prevFail.preview.id],
+    );
+    await sql2.end();
+    check("failed preview marked status=failed", failRow.rows[0]?.status === "failed");
+    check("failed preview has ended_at set", failRow.rows[0]?.ended_at !== null);
+    check("failed preview captured error message", failRow.rows[0]?.error_message === "ffmpeg not found");
 
     // ===== Cross-org isolation =====
     // Insert a foreign org + connector via SQL, then confirm the operator's
