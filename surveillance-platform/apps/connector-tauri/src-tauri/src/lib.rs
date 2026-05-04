@@ -1,7 +1,9 @@
 mod pairing;
 mod poller;
+mod preview;
 mod rtsp;
 mod state;
+mod time;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};

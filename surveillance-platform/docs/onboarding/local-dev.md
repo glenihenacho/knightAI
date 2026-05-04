@@ -6,6 +6,7 @@
 - pnpm 9+
 - Docker (for Postgres + MinIO)
 - Rust toolchain (only needed if running `connector-tauri`)
+- `ffmpeg` on PATH on the connector machine (used by the HLS preview pipeline)
 
 ## First run
 

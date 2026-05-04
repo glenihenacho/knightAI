@@ -4,6 +4,7 @@ import type {
   CreateCameraRequest,
   CreatePairingResponse,
   MeResponse,
+  PreviewSessionResponse,
 } from "@surveillance/shared";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
@@ -74,6 +75,24 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(req),
     }),
+
+  startPreview: (cameraId: string) =>
+    call<PreviewSessionResponse>(
+      `/v1/cameras/${encodeURIComponent(cameraId)}/preview`,
+      { method: "POST" },
+    ),
+
+  stopPreview: (cameraId: string) =>
+    call<void>(
+      `/v1/cameras/${encodeURIComponent(cameraId)}/preview`,
+      { method: "DELETE" },
+    ),
+
+  heartbeatPreview: (previewId: string) =>
+    call<void>(
+      `/v1/previews/${encodeURIComponent(previewId)}/heartbeat`,
+      { method: "POST" },
+    ),
 };
 
 export const SNAPSHOT_URL = (key: string) => `${BASE}/v1/snapshots/${encodeURIComponent(key)}`;
