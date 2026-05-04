@@ -59,7 +59,11 @@ export interface Store {
 
   enqueueCommand(connectorId: string, command: Command, cameraId: string | null): Promise<void>;
   takeNextCommand(connectorId: string): Promise<Command | null>;
-  recordResult(commandId: string, result: unknown): Promise<CommandRowRef | null>;
+  recordResult(input: {
+    connectorId: string;
+    commandId: string;
+    result: unknown;
+  }): Promise<CommandRowRef | null>;
 }
 
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -340,15 +344,18 @@ export function createStore(databaseUrl: string): Store {
       });
     },
 
-    async recordResult(commandId, result) {
+    async recordResult({ connectorId, commandId, result }) {
       return withTx(pool, async (client) => {
         const { rows } = await client.query<{
           connector_id: string;
           camera_id: string | null;
           kind: Command["kind"];
         }>(
-          "SELECT connector_id, camera_id, kind FROM commands WHERE id = $1 FOR UPDATE",
-          [commandId],
+          `SELECT connector_id, camera_id, kind
+             FROM commands
+            WHERE id = $1 AND connector_id = $2
+            FOR UPDATE`,
+          [commandId, connectorId],
         );
         const row = rows[0];
         if (!row) return null;

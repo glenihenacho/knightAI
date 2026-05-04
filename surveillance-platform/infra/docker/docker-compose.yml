@@ -34,6 +34,8 @@ services:
 
   # One-shot init: creates the snapshot bucket if it doesn't exist, then exits.
   # Re-runs on every `docker compose up` and is a no-op when the bucket exists.
+  # Bucket stays private; the API serves snapshots via short-lived signed URLs,
+  # matching how Cloudflare R2 / S3 are configured in production.
   minio-init:
     image: minio/mc:latest
     depends_on:
@@ -42,8 +44,7 @@ services:
     entrypoint: >
       /bin/sh -c "
       mc alias set local http://minio:9000 surveillance surveillance &&
-      mc mb --ignore-existing local/surveillance &&
-      mc anonymous set download local/surveillance ||
+      mc mb --ignore-existing local/surveillance ||
       exit 0
       "
 

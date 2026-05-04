@@ -17,8 +17,14 @@ export function registerCommandRoutes(app: FastifyInstance, store: Store): void 
     if (!connector) return;
     const result = CommandResultSchema.parse(req.body);
 
-    const ref = await store.recordResult(result.commandId, result);
+    const ref = await store.recordResult({
+      connectorId: connector.id,
+      commandId: result.commandId,
+      result,
+    });
     if (!ref) {
+      // Either the command id doesn't exist or it belongs to a different
+      // connector. Return 404 either way so we don't leak existence.
       return reply.code(404).send({ error: "command not found" });
     }
 

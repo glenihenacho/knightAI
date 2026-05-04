@@ -1,9 +1,13 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getPool, withTx } from "./client.js";
 
-const DEFAULT_MIGRATIONS_DIR = resolve(
+// Source-tree default: from apps/api/src/db/migrate.ts up to repo root.
+// Note: this path only resolves when running from source (tsx). After `tsc`
+// the file lives in apps/api/dist/db/migrate.js, so production must set
+// MIGRATIONS_DIR to a path that's bundled into the deploy artifact.
+const SOURCE_DEFAULT_MIGRATIONS_DIR = resolve(
   fileURLToPath(new URL("../../../../infra/database/migrations", import.meta.url)),
 );
 
@@ -14,7 +18,14 @@ export interface MigrateOptions {
 }
 
 export async function runMigrations(opts: MigrateOptions): Promise<void> {
-  const dir = opts.migrationsDir ?? DEFAULT_MIGRATIONS_DIR;
+  const dir = opts.migrationsDir ?? process.env.MIGRATIONS_DIR ?? SOURCE_DEFAULT_MIGRATIONS_DIR;
+  try {
+    await stat(dir);
+  } catch {
+    throw new Error(
+      `migrations directory not found: ${dir}. Set MIGRATIONS_DIR or pass migrationsDir.`,
+    );
+  }
   const pool = getPool(opts.databaseUrl);
   const log = opts.logger ?? console;
 
