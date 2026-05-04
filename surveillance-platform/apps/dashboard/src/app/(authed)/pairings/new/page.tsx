@@ -13,7 +13,7 @@ export default function NewPairingPage() {
     setPending(true);
     setError(null);
     try {
-      const res = await api.createPairing("00000000-0000-0000-0000-000000000001");
+      const res = await api.createPairing();
       setCode(res.code);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

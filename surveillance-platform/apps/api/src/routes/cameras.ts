@@ -7,9 +7,12 @@ import {
 } from "@surveillance/shared";
 import { parseRtspUrl, RtspUrlError } from "@surveillance/camera-core";
 import type { Store } from "../db/store.js";
+import { requireOperator } from "../auth.js";
 
 export function registerCameraRoutes(app: FastifyInstance, store: Store): void {
   app.post("/v1/cameras", async (req, reply) => {
+    const user = await requireOperator(req, reply, store);
+    if (!user) return;
     const body = CreateCameraRequestSchema.parse(req.body);
     try {
       parseRtspUrl(body.rtspUrl);
@@ -20,8 +23,9 @@ export function registerCameraRoutes(app: FastifyInstance, store: Store): void {
       throw err;
     }
 
-    const connector = await store.getConnector(body.connectorId);
+    const connector = await store.getConnectorForOrg(body.connectorId, user.organizationId);
     if (!connector) {
+      // Both "not found" and "not in your org" return 404 — don't leak existence.
       return reply.code(404).send({ error: "connector not found" });
     }
 
@@ -52,7 +56,9 @@ export function registerCameraRoutes(app: FastifyInstance, store: Store): void {
     return reply.code(201).send({ camera, queuedCommandId: command.id });
   });
 
-  app.get("/v1/cameras", async () => ({
-    cameras: await store.listCameras(),
-  }));
+  app.get("/v1/cameras", async (req, reply) => {
+    const user = await requireOperator(req, reply, store);
+    if (!user) return;
+    return { cameras: await store.listCamerasForOrg(user.organizationId) };
+  });
 }

@@ -5,6 +5,7 @@ import type {
   Command,
   Connector,
   ConnectorStatus,
+  User,
 } from "@surveillance/shared";
 import { getPool, withTx } from "./client.js";
 
@@ -33,6 +34,16 @@ export interface CommandRowRef {
   kind: Command["kind"];
 }
 
+export interface IssuedToken {
+  token: string;
+  expiresAt: string;
+}
+
+export interface SessionPrincipal {
+  user: User;
+  sessionId: string;
+}
+
 export interface Store {
   createOrganization(name: string): Promise<{ id: string; name: string }>;
   getOrganization(id: string): Promise<{ id: string; name: string } | null>;
@@ -42,12 +53,14 @@ export interface Store {
   redeemPairing(code: string, info: RedeemInfo): Promise<RedeemedConnector | null>;
 
   authConnector(connectorId: string, token: string): Promise<Connector | null>;
-  listConnectors(): Promise<Connector[]>;
-  getConnector(id: string): Promise<Connector | null>;
+  listConnectorsForOrg(organizationId: string): Promise<Connector[]>;
+  // Scoped by org so a request from operator A can never resolve a connector
+  // owned by org B.
+  getConnectorForOrg(id: string, organizationId: string): Promise<Connector | null>;
   setConnectorStatus(connectorId: string, status: ConnectorStatus): Promise<void>;
 
   createCamera(camera: Camera): Promise<Camera>;
-  listCameras(): Promise<Camera[]>;
+  listCamerasForOrg(organizationId: string): Promise<Camera[]>;
   getCamera(id: string): Promise<Camera | null>;
   updateCameraValidation(input: {
     id: string;
@@ -64,6 +77,28 @@ export interface Store {
     commandId: string;
     result: unknown;
   }): Promise<CommandRowRef | null>;
+
+  // Operator auth (dashboard).
+  findUserByEmail(email: string): Promise<User | null>;
+  // Resolves the user for a magic-link verify. Creates the user if absent,
+  // assigning them to the unique organization. If 0 or >1 orgs exist this
+  // throws — invites/multi-tenancy is intentionally not implemented yet.
+  findOrCreateUserForLogin(email: string): Promise<User>;
+  // Issues a single-use magic link valid for ttlSeconds. The raw token is
+  // returned for embedding in the email; only its hash is persisted.
+  createMagicLink(email: string, ttlSeconds: number): Promise<IssuedToken>;
+  // Atomically consumes a magic link, returning the bound email if the link
+  // exists, hasn't expired, and hasn't been used. Marks used_at = now() so a
+  // single token can never grant two sessions.
+  consumeMagicLink(token: string): Promise<{ email: string } | null>;
+  // Issues a session cookie token valid for ttlSeconds; raw token returned for
+  // the Set-Cookie header.
+  createSession(userId: string, ttlSeconds: number): Promise<IssuedToken>;
+  // Resolves the user for a presented session cookie. Touches last_seen_at on
+  // the session row so dashboards can show "active". Returns null on missing,
+  // expired, or unknown tokens.
+  findSessionByToken(token: string): Promise<SessionPrincipal | null>;
+  deleteSessionByToken(token: string): Promise<void>;
 }
 
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -137,6 +172,28 @@ function rowToCamera(row: CameraRow): Camera {
     lastSnapshotKey: row.last_snapshot_key,
     errorMessage: row.error_message,
   };
+}
+
+interface UserRow {
+  id: string;
+  organization_id: string;
+  email: string;
+  display_name: string | null;
+  created_at: Date;
+}
+
+function rowToUser(row: UserRow): User {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    email: row.email,
+    displayName: row.display_name,
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+function normalizeEmail(raw: string): string {
+  return raw.trim().toLowerCase();
 }
 
 interface CommandRow {
@@ -249,19 +306,23 @@ export function createStore(databaseUrl: string): Store {
       return rowToConnector(row);
     },
 
-    async listConnectors() {
+    async listConnectorsForOrg(organizationId) {
       const { rows } = await pool.query<ConnectorRow>(
         `SELECT id, organization_id, label, hostname, platform, version, status, last_seen_at, created_at
-           FROM connectors ORDER BY created_at DESC`,
+           FROM connectors
+          WHERE organization_id = $1
+          ORDER BY created_at DESC`,
+        [organizationId],
       );
       return rows.map(rowToConnector);
     },
 
-    async getConnector(id) {
+    async getConnectorForOrg(id, organizationId) {
       const { rows } = await pool.query<ConnectorRow>(
         `SELECT id, organization_id, label, hostname, platform, version, status, last_seen_at, created_at
-           FROM connectors WHERE id = $1`,
-        [id],
+           FROM connectors
+          WHERE id = $1 AND organization_id = $2`,
+        [id, organizationId],
       );
       return rows[0] ? rowToConnector(rows[0]) : null;
     },
@@ -289,10 +350,15 @@ export function createStore(databaseUrl: string): Store {
       return rowToCamera(rows[0]!);
     },
 
-    async listCameras() {
+    async listCamerasForOrg(organizationId) {
       const { rows } = await pool.query<CameraRow>(
-        `SELECT id, connector_id, label, rtsp_url, state, last_validated_at, last_snapshot_key, error_message
-           FROM cameras ORDER BY created_at DESC`,
+        `SELECT c.id, c.connector_id, c.label, c.rtsp_url, c.state,
+                c.last_validated_at, c.last_snapshot_key, c.error_message
+           FROM cameras c
+           JOIN connectors n ON n.id = c.connector_id
+          WHERE n.organization_id = $1
+          ORDER BY c.created_at DESC`,
+        [organizationId],
       );
       return rows.map(rowToCamera);
     },
@@ -370,5 +436,131 @@ export function createStore(databaseUrl: string): Store {
         };
       });
     },
+
+    async findUserByEmail(email) {
+      const { rows } = await pool.query<UserRow>(
+        `SELECT id, organization_id, email, display_name, created_at
+           FROM users WHERE email = $1`,
+        [normalizeEmail(email)],
+      );
+      return rows[0] ? rowToUser(rows[0]) : null;
+    },
+
+    async findOrCreateUserForLogin(email) {
+      const normalized = normalizeEmail(email);
+      return withTx(pool, async (client) => {
+        const existing = await client.query<UserRow>(
+          `SELECT id, organization_id, email, display_name, created_at
+             FROM users WHERE email = $1`,
+          [normalized],
+        );
+        if (existing.rows[0]) return rowToUser(existing.rows[0]);
+
+        const orgs = await client.query<{ id: string }>(
+          "SELECT id FROM organizations ORDER BY created_at LIMIT 2",
+        );
+        if (orgs.rows.length === 0) {
+          throw new Error("no organization exists; cannot provision user");
+        }
+        if (orgs.rows.length > 1) {
+          throw new Error(
+            "multiple organizations exist; refusing to auto-assign. invite flow not implemented",
+          );
+        }
+        const orgId = orgs.rows[0]!.id;
+        const inserted = await client.query<UserRow>(
+          `INSERT INTO users (organization_id, email)
+           VALUES ($1, $2)
+           RETURNING id, organization_id, email, display_name, created_at`,
+          [orgId, normalized],
+        );
+        return rowToUser(inserted.rows[0]!);
+      });
+    },
+
+    async createMagicLink(email, ttlSeconds) {
+      const token = randomBytes(32).toString("hex");
+      const tokenHash = hashToken(token);
+      const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
+      await pool.query(
+        `INSERT INTO magic_links (email, token_hash, expires_at)
+         VALUES ($1, $2, $3)`,
+        [normalizeEmail(email), tokenHash, expiresAt],
+      );
+      return { token, expiresAt: expiresAt.toISOString() };
+    },
+
+    async consumeMagicLink(token) {
+      const tokenHash = hashToken(token);
+      const { rows } = await pool.query<{ email: string }>(
+        `UPDATE magic_links
+            SET used_at = now()
+          WHERE token_hash = $1
+            AND used_at IS NULL
+            AND expires_at > now()
+          RETURNING email`,
+        [tokenHash],
+      );
+      return rows[0] ? { email: rows[0].email } : null;
+    },
+
+    async createSession(userId, ttlSeconds) {
+      const token = randomBytes(32).toString("hex");
+      const tokenHash = hashToken(token);
+      const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
+      await pool.query(
+        `INSERT INTO sessions (user_id, token_hash, expires_at)
+         VALUES ($1, $2, $3)`,
+        [userId, tokenHash, expiresAt],
+      );
+      return { token, expiresAt: expiresAt.toISOString() };
+    },
+
+    async findSessionByToken(token) {
+      const tokenHash = hashToken(token);
+      const { rows } = await pool.query<{
+        session_id: string;
+        user_id: string;
+        organization_id: string;
+        email: string;
+        display_name: string | null;
+        user_created_at: Date;
+      }>(
+        `UPDATE sessions s
+            SET last_seen_at = now()
+           FROM users u
+          WHERE s.user_id = u.id
+            AND s.token_hash = $1
+            AND s.expires_at > now()
+          RETURNING s.id AS session_id,
+                    u.id AS user_id,
+                    u.organization_id,
+                    u.email,
+                    u.display_name,
+                    u.created_at AS user_created_at`,
+        [tokenHash],
+      );
+      const row = rows[0];
+      if (!row) return null;
+      return {
+        sessionId: row.session_id,
+        user: rowToUser({
+          id: row.user_id,
+          organization_id: row.organization_id,
+          email: row.email,
+          display_name: row.display_name,
+          created_at: row.user_created_at,
+        }),
+      };
+    },
+
+    async deleteSessionByToken(token) {
+      const tokenHash = hashToken(token);
+      await pool.query("DELETE FROM sessions WHERE token_hash = $1", [tokenHash]);
+    },
   };
 }
+
+// Re-exported for callers that need to compare a presented token to a stored
+// hash without going through the store (e.g. tests).
+export { hashToken, compareTokenHash };

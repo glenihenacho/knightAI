@@ -1,10 +1,10 @@
 import { StatusBadge } from "@surveillance/ui";
-import { api } from "@/lib/api";
+import { listConnectorsServer } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
 
 export default async function ConnectorsPage() {
-  const { connectors } = await api.listConnectors();
+  const { connectors } = await listConnectorsServer();
   return (
     <section>
       <h1>Connectors</h1>

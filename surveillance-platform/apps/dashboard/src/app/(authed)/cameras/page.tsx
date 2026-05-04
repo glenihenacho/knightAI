@@ -1,10 +1,11 @@
 import { CameraPreview } from "@surveillance/ui";
-import { api, SNAPSHOT_URL } from "@/lib/api";
+import { SNAPSHOT_URL } from "@/lib/api";
+import { listCamerasServer } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
 
 export default async function CamerasPage() {
-  const { cameras } = await api.listCameras();
+  const { cameras } = await listCamerasServer();
   return (
     <section>
       <h1>Cameras</h1>

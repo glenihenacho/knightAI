@@ -1,0 +1,411 @@
+/**
+ * End-to-end smoke test for the API. Covers M1 (Postgres + S3 + connector
+ * pairing) and M2 (magic-link operator auth + org-scoped routes).
+ *
+ * Runs against:
+ *   - real Postgres (DATABASE_URL must point at a fresh DB; this script wipes it)
+ *   - in-process S3 stub on port 19000
+ *
+ * Resend isn't configured, so the magic link prints to stdout via the dev
+ * fallback transport. The test buffers the API child's stdout and extracts
+ * the token from the log line.
+ */
+import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { setTimeout as sleep } from "node:timers/promises";
+import { Client } from "pg";
+
+const API_PORT = 14099;
+const S3_PORT = 19000;
+const DASHBOARD_BASE_URL = "http://127.0.0.1:13000";
+const SEED_ORG_NAME = "Acme";
+const OPERATOR_EMAIL = "operator@example.com";
+const DATABASE_URL =
+  process.env.DATABASE_URL ?? "postgres://surveillance:surveillance@127.0.0.1:5432/surveillance";
+
+let failures = 0;
+function check(label: string, ok: boolean, detail?: unknown) {
+  const marker = ok ? "PASS" : "FAIL";
+  console.log(`[${marker}] ${label}${detail !== undefined ? ` :: ${JSON.stringify(detail)}` : ""}`);
+  if (!ok) failures += 1;
+}
+
+async function wipeDb() {
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  await client.query(`
+    DROP TABLE IF EXISTS sessions CASCADE;
+    DROP TABLE IF EXISTS magic_links CASCADE;
+    DROP TABLE IF EXISTS users CASCADE;
+    DROP TABLE IF EXISTS commands CASCADE;
+    DROP TABLE IF EXISTS cameras CASCADE;
+    DROP TABLE IF EXISTS connectors CASCADE;
+    DROP TABLE IF EXISTS pairings CASCADE;
+    DROP TABLE IF EXISTS organizations CASCADE;
+    DROP TABLE IF EXISTS _migrations CASCADE;
+    DROP TYPE IF EXISTS connector_status CASCADE;
+    DROP TYPE IF EXISTS connector_platform CASCADE;
+    DROP TYPE IF EXISTS camera_state CASCADE;
+    DROP TYPE IF EXISTS command_status CASCADE;
+    DROP TYPE IF EXISTS command_kind CASCADE;
+  `);
+  await client.end();
+}
+
+interface S3Stub {
+  putCount: number;
+  lastBody: Buffer | null;
+  lastKey: string | null;
+  close(): Promise<void>;
+}
+
+function startS3Stub(): Promise<S3Stub> {
+  return new Promise((resolve) => {
+    const stub: S3Stub = {
+      putCount: 0,
+      lastBody: null,
+      lastKey: null,
+      close: () => new Promise((res) => server.close(() => res())),
+    };
+    const server = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      const body = Buffer.concat(chunks);
+      if (req.method === "PUT") {
+        stub.putCount += 1;
+        stub.lastBody = body;
+        stub.lastKey = req.url ?? null;
+        res.writeHead(200, { ETag: '"deadbeef"' });
+        res.end();
+        return;
+      }
+      if (req.method === "GET") {
+        if (stub.lastBody && req.url?.includes(stub.lastKey?.split("?")[0] ?? "")) {
+          res.writeHead(200, { "content-type": "image/jpeg" });
+          res.end(stub.lastBody);
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      res.writeHead(405);
+      res.end();
+    });
+    server.listen(S3_PORT, () => resolve(stub));
+  });
+}
+
+interface ApiHandle {
+  stop(): Promise<void>;
+  /** All bytes the API has written to stdout/stderr since start. */
+  stdoutBuffer: string[];
+}
+
+async function startApi(): Promise<ApiHandle> {
+  const tsxBin = new URL("../node_modules/.bin/tsx", import.meta.url).pathname;
+  const serverEntry = new URL("../src/server.ts", import.meta.url).pathname;
+  const buffer: string[] = [];
+  const child = spawn(tsxBin, [serverEntry], {
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PORT: String(API_PORT),
+      DATABASE_URL,
+      PUBLIC_BASE_URL: `http://127.0.0.1:${API_PORT}`,
+      DASHBOARD_BASE_URL,
+      MIGRATE_ON_BOOT: "true",
+      SEED_ORGANIZATION_NAME: SEED_ORG_NAME,
+      S3_ENDPOINT: `http://127.0.0.1:${S3_PORT}`,
+      S3_REGION: "us-east-1",
+      S3_BUCKET: "surveillance",
+      S3_ACCESS_KEY_ID: "test",
+      S3_SECRET_ACCESS_KEY: "test",
+      S3_FORCE_PATH_STYLE: "true",
+      SNAPSHOT_URL_TTL_SECONDS: "120",
+      MAGIC_LINK_TTL_SECONDS: "60",
+      SESSION_TTL_SECONDS: "3600",
+      SESSION_COOKIE_SECURE: "false",
+      RESEND_API_KEY: "",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout.on("data", (b) => {
+    const str = String(b);
+    buffer.push(str);
+    process.stderr.write(`[api] ${str}`);
+  });
+  child.stderr.on("data", (b) => {
+    const str = String(b);
+    buffer.push(str);
+    process.stderr.write(`[api!] ${str}`);
+  });
+
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${API_PORT}/healthz`);
+      if (r.ok) break;
+    } catch {
+      // keep waiting
+    }
+    await sleep(200);
+  }
+  return {
+    stdoutBuffer: buffer,
+    stop: () =>
+      new Promise((resolve) => {
+        child.once("exit", () => resolve());
+        child.kill("SIGTERM");
+      }),
+  };
+}
+
+function extractMagicLink(buffer: string[]): string | null {
+  // Dev transport logs a Pino line containing "link":"http://.../verify?token=..."
+  const joined = buffer.join("");
+  const match = joined.match(/"link":"(http[^"]+\/v1\/auth\/verify\?token=[^"]+)"/);
+  return match?.[1] ?? null;
+}
+
+function parseSessionCookie(setCookie: string | null): string | null {
+  if (!setCookie) return null;
+  const match = setCookie.match(/surv_sess=([^;]+)/);
+  return match?.[1] ?? null;
+}
+
+const API = `http://127.0.0.1:${API_PORT}`;
+
+async function main() {
+  await wipeDb();
+  const s3 = await startS3Stub();
+  const api = await startApi();
+
+  try {
+    // ===== M2: protected routes reject anonymous access =====
+    const blockedPairings = await fetch(`${API}/v1/pairings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    check("POST /v1/pairings without session 401", blockedPairings.status === 401);
+
+    const blockedCameras = await fetch(`${API}/v1/cameras`);
+    check("GET /v1/cameras without session 401", blockedCameras.status === 401);
+
+    const blockedConnectors = await fetch(`${API}/v1/connectors`);
+    check("GET /v1/connectors without session 401", blockedConnectors.status === 401);
+
+    const blockedMe = await fetch(`${API}/v1/auth/me`);
+    check("GET /v1/auth/me without session 401", blockedMe.status === 401);
+
+    // ===== Magic-link login =====
+    const reqLinkRes = await fetch(`${API}/v1/auth/magic-link`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: OPERATOR_EMAIL }),
+    });
+    check("POST /v1/auth/magic-link 204", reqLinkRes.status === 204);
+
+    await sleep(50);
+    const link = extractMagicLink(api.stdoutBuffer);
+    check("magic link logged to stdout", typeof link === "string" && link.startsWith(API), link);
+    if (!link) throw new Error("magic link missing — cannot continue");
+
+    // Verify with bogus token redirects with error param.
+    const wrongVerify = await fetch(`${API}/v1/auth/verify?token=invalid`, {
+      redirect: "manual",
+    });
+    check(
+      "verify with bogus token redirects to /login?error=...",
+      wrongVerify.status === 302 && (wrongVerify.headers.get("location") ?? "").includes("error="),
+    );
+
+    // Verify with the real token: 302 to dashboard with Set-Cookie.
+    const verifyRes = await fetch(link, { redirect: "manual" });
+    check("verify with real token 302", verifyRes.status === 302);
+    check("verify lands on dashboard root", verifyRes.headers.get("location") === DASHBOARD_BASE_URL);
+    const sessionCookie = parseSessionCookie(verifyRes.headers.get("set-cookie"));
+    check("Set-Cookie contains surv_sess", typeof sessionCookie === "string" && sessionCookie.length > 0);
+    if (!sessionCookie) throw new Error("session cookie missing");
+    const cookieHeader = `surv_sess=${sessionCookie}`;
+
+    // Replay the consumed link → error redirect.
+    const replayLinkRes = await fetch(link, { redirect: "manual" });
+    const replayLoc = replayLinkRes.headers.get("location") ?? "";
+    check(
+      "magic link replay redirects with error",
+      replayLinkRes.status === 302 && replayLoc.includes("error="),
+    );
+
+    // /me with cookie returns user.
+    const meRes = await fetch(`${API}/v1/auth/me`, { headers: { cookie: cookieHeader } });
+    check("GET /v1/auth/me 200", meRes.status === 200);
+    const me = await meRes.json();
+    check("me returns email", me.user.email === OPERATOR_EMAIL);
+    check("me returns organizationId", typeof me.user.organizationId === "string");
+    const orgId = me.user.organizationId;
+
+    // GET /v1/organizations returns just the operator's org.
+    const orgsRes = await fetch(`${API}/v1/organizations`, { headers: { cookie: cookieHeader } });
+    const orgs = await orgsRes.json();
+    check("orgs list has exactly one entry", orgs.organizations.length === 1);
+    check("orgs entry matches user", orgs.organizations[0]?.id === orgId);
+
+    // ===== M1 flow over an authenticated session =====
+    // Create pairing — body no longer carries organizationId.
+    const pairRes = await fetch(`${API}/v1/pairings`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({}),
+    });
+    check("POST /v1/pairings 201", pairRes.status === 201);
+    const pairing = await pairRes.json();
+    check("pairing code matches XXXX-XXXX", /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(pairing.code));
+
+    // Connector redeems (no auth header — pairing code is the credential).
+    const redeemRes = await fetch(`${API}/v1/pairings/redeem`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code: pairing.code,
+        hostname: "test-box",
+        platform: "linux",
+        version: "0.1.0",
+      }),
+    });
+    check("redeem pairing 200", redeemRes.status === 200);
+    const redeemed = await redeemRes.json();
+    const auth = {
+      authorization: `Bearer ${redeemed.connectorToken}`,
+      "x-connector-id": redeemed.connectorId,
+    };
+
+    // Operator lists connectors — should see the new one.
+    const listRes = await fetch(`${API}/v1/connectors`, { headers: { cookie: cookieHeader } });
+    const list = await listRes.json();
+    check(
+      "connector list contains the redeemed one",
+      list.connectors.some((c: { id: string }) => c.id === redeemed.connectorId),
+    );
+
+    // Camera POST.
+    const camRes = await fetch(`${API}/v1/cameras`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        connectorId: redeemed.connectorId,
+        label: "Front door",
+        rtspUrl: "rtsp://example.com:554/stream",
+      }),
+    });
+    check("create camera 201", camRes.status === 201);
+    const { camera, queuedCommandId } = await camRes.json();
+
+    // Connector polls.
+    const cmdRes = await fetch(`${API}/v1/connectors/commands/next`, { headers: auth });
+    check("connector poll returns queued command", cmdRes.status === 200);
+    const cmd = await cmdRes.json();
+    check(
+      "queued command is the validate_rtsp",
+      cmd.id === queuedCommandId && cmd.kind === "validate_rtsp",
+    );
+
+    // Snapshot upload + result submission.
+    const fakeJpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70, 73, 70, 0]);
+    const uploadKey = "snap-12345";
+    const upRes = await fetch(`${API}/v1/connectors/uploads/${uploadKey}`, {
+      method: "PUT",
+      headers: { ...auth, "content-type": "image/jpeg" },
+      body: fakeJpeg,
+    });
+    check("connector upload 204", upRes.status === 204);
+    check("S3 stub got upload", s3.putCount === 1 && s3.lastBody?.equals(fakeJpeg) === true);
+
+    const resultRes = await fetch(`${API}/v1/connectors/commands/${cmd.id}/result`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: cmd.id,
+        status: "ok",
+        durationMs: 1234,
+        finishedAt: new Date().toISOString(),
+        validateRtsp: { reachable: true, snapshotUploadKey: uploadKey },
+      }),
+    });
+    check("submit result 204", resultRes.status === 204);
+
+    // Operator sees camera state online.
+    const camsRes = await fetch(`${API}/v1/cameras`, { headers: { cookie: cookieHeader } });
+    const cams = await camsRes.json();
+    const updated = cams.cameras.find((c: { id: string }) => c.id === camera.id);
+    check(
+      "camera online after validation",
+      updated?.state === "online" && updated?.lastSnapshotKey === uploadKey,
+    );
+
+    // Snapshot URL endpoint redirects to signed URL (still public per design).
+    const snapRes = await fetch(`${API}/v1/snapshots/${uploadKey}`, { redirect: "manual" });
+    check("snapshot redirect 302", snapRes.status === 302);
+    const snapLoc = snapRes.headers.get("location") ?? "";
+    check("signed URL has X-Amz-Signature", snapLoc.includes("X-Amz-Signature="));
+
+    // ===== Cross-org isolation =====
+    // Insert a foreign org + connector via SQL, then confirm the operator's
+    // session does not see it through the org-scoped list endpoints.
+    const sql = new Client({ connectionString: DATABASE_URL });
+    await sql.connect();
+    const otherOrg = await sql.query<{ id: string }>(
+      "INSERT INTO organizations (name) VALUES ('Other Co') RETURNING id",
+    );
+    const otherOrgId = otherOrg.rows[0]!.id;
+    await sql.query(
+      `INSERT INTO connectors (organization_id, label, hostname, platform, version, status, token_hash, last_seen_at)
+       VALUES ($1, 'foreign', 'foreign-host', 'linux', '0.1.0', 'online',
+               '0000000000000000000000000000000000000000000000000000000000000000', now())`,
+      [otherOrgId],
+    );
+    await sql.end();
+
+    const isolatedListRes = await fetch(`${API}/v1/connectors`, { headers: { cookie: cookieHeader } });
+    const isolatedList = await isolatedListRes.json();
+    check(
+      "operator does not see foreign-org connector",
+      !isolatedList.connectors.some((c: { label: string }) => c.label === "foreign"),
+    );
+
+    // ===== Path-traversal upload key still rejected =====
+    const badKeyRes = await fetch(`${API}/v1/connectors/uploads/..%2Fevil`, {
+      method: "PUT",
+      headers: { ...auth, "content-type": "image/jpeg" },
+      body: fakeJpeg,
+    });
+    check("path-traversal upload key 400", badKeyRes.status === 400);
+
+    // ===== Logout =====
+    const logoutRes = await fetch(`${API}/v1/auth/logout`, {
+      method: "POST",
+      headers: { cookie: cookieHeader },
+    });
+    check("POST /v1/auth/logout 204", logoutRes.status === 204);
+
+    const postLogoutMe = await fetch(`${API}/v1/auth/me`, { headers: { cookie: cookieHeader } });
+    check("GET /v1/auth/me after logout 401", postLogoutMe.status === 401);
+  } finally {
+    await api.stop();
+    await s3.close();
+  }
+
+  if (failures > 0) {
+    console.error(`\n${failures} check(s) failed`);
+    process.exit(1);
+  } else {
+    console.log("\nall checks passed");
+    process.exit(0);
+  }
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

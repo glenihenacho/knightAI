@@ -36,6 +36,27 @@ const EnvSchema = z.object({
   // If set and no organization rows exist, create one with this name on boot.
   // Returns the org id in the logs so you can paste it into the dashboard.
   SEED_ORGANIZATION_NAME: z.string().optional(),
+
+  // Operator auth (dashboard).
+  // Where the dashboard is served from. Used as the redirect target after a
+  // magic-link verify and as the allowed CORS origin for credentialed requests.
+  DASHBOARD_BASE_URL: z.string().url().default("http://localhost:3000"),
+  // Resend transactional email. If RESEND_API_KEY is unset the magic link is
+  // logged to stdout instead of sent — convenient for local dev and CI.
+  RESEND_API_KEY: z.string().optional(),
+  RESEND_FROM_EMAIL: z.string().default("auth@localhost"),
+  // Magic-link / session lifetimes.
+  MAGIC_LINK_TTL_SECONDS: z.coerce.number().int().positive().default(15 * 60),
+  SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(14 * 24 * 60 * 60),
+  // Whether the session cookie is marked Secure. Defaults off for dev (http);
+  // production deploys flip this on.
+  SESSION_COOKIE_SECURE: z
+    .string()
+    .default("false")
+    .transform((v) => v === "true" || v === "1"),
+  // Optional Domain attribute for the session cookie (e.g. ".knightai.com" so
+  // both api.* and dashboard.* see it). Leave unset for localhost dev.
+  SESSION_COOKIE_DOMAIN: z.string().optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

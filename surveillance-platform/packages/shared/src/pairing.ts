@@ -4,8 +4,9 @@ export const PairingCodeSchema = z
   .string()
   .regex(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/, "expected XXXX-XXXX format");
 
+// The organization is derived from the authenticated operator's session, so
+// the body only carries the optional label.
 export const CreatePairingRequestSchema = z.object({
-  organizationId: z.string().uuid(),
   label: z.string().min(1).max(120).optional(),
 });
 

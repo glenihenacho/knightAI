@@ -1,6 +1,7 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
-import type { Connector } from "@surveillance/shared";
+import type { Connector, User } from "@surveillance/shared";
 import type { Store } from "./db/store.js";
+import { SESSION_COOKIE_NAME } from "./cookies.js";
 
 export async function authenticateConnector(
   req: FastifyRequest,
@@ -20,4 +21,27 @@ export async function authenticateConnector(
     return null;
   }
   return connector;
+}
+
+/**
+ * Resolves the operator (dashboard user) for a request via the session cookie.
+ * Replies 401 and returns null when the cookie is missing or invalid; callers
+ * should `return` immediately in that case.
+ */
+export async function requireOperator(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  store: Store,
+): Promise<User | null> {
+  const token = req.cookies?.[SESSION_COOKIE_NAME];
+  if (!token) {
+    reply.code(401).send({ error: "not authenticated" });
+    return null;
+  }
+  const principal = await store.findSessionByToken(token);
+  if (!principal) {
+    reply.code(401).send({ error: "session invalid or expired" });
+    return null;
+  }
+  return principal.user;
 }
