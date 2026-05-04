@@ -33,6 +33,7 @@ async fn get_pairing_status(state: tauri::State<'_, AppState>) -> Result<Pairing
 
 #[tauri::command]
 async fn pair_with_code(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     api_url: String,
     code: String,
@@ -42,7 +43,7 @@ async fn pair_with_code(
         .map_err(|e| e.to_string())?;
     let mut connector = state.connector.lock();
     connector.set_identity(identity.clone());
-    poller::spawn(connector.clone_handle(), identity.clone());
+    poller::spawn(app, connector.clone_handle(), identity.clone());
     Ok(PairingStatus::Paired {
         connector_id: identity.connector_id,
         api_base_url: identity.api_base_url,

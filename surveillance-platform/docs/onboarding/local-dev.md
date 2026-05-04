@@ -6,7 +6,13 @@
 - pnpm 9+
 - Docker (for Postgres + MinIO)
 - Rust toolchain (only needed if running `connector-tauri`)
-- `ffmpeg` on PATH on the connector machine (used by the HLS preview pipeline)
+
+The connector ships FFmpeg as a Tauri sidecar binary; no system-wide install is
+required. The first `pnpm --filter @surveillance/connector-tauri tauri:dev`
+(or `tauri:build`) auto-fetches a static FFmpeg into
+`apps/connector-tauri/src-tauri/binaries/` via `scripts/fetch-ffmpeg.mjs`.
+Run it manually with `pnpm --filter @surveillance/connector-tauri fetch:ffmpeg`,
+or pin a specific BtbN autobuild via `FFMPEG_BUILD_TAG=autobuild-YYYY-MM-DD-HH-MM`.
 
 ## First run
 

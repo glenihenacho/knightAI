@@ -14,8 +14,13 @@ coverage
 
 # Tauri
 target/
-src-tauri/target/
-src-tauri/gen/
+**/src-tauri/target/
+**/src-tauri/gen/
+
+# FFmpeg sidecar binaries — fetched per-host via scripts/fetch-ffmpeg.mjs.
+# Tracked as a placeholder dir; ignore the binaries themselves.
+**/src-tauri/binaries/*
+!**/src-tauri/binaries/.gitkeep
 
 # IDE
 .vscode/*

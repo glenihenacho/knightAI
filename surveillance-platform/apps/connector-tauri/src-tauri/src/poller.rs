@@ -72,10 +72,14 @@ struct CommandOutcome {
 
 /// Spawn the polling loop for a paired connector. Idempotent for a given identity:
 /// callers should ensure they don't spawn twice.
-pub fn spawn(_existing: Option<ConnectorIdentity>, identity: ConnectorIdentity) {
+pub fn spawn(
+    app: tauri::AppHandle,
+    _existing: Option<ConnectorIdentity>,
+    identity: ConnectorIdentity,
+) {
     tauri::async_runtime::spawn(async move {
         let client = reqwest::Client::new();
-        let manager = PreviewManager::new();
+        let manager = PreviewManager::new(app);
         loop {
             match poll_once(&client, &identity, &manager).await {
                 Ok(Some(())) => {} // got a command, immediately try again

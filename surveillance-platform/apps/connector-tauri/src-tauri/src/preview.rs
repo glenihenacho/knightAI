@@ -1,10 +1,12 @@
 // HLS preview pipeline. Each active session owns:
-//  - an `ffmpeg` child process transcoding RTSP -> HLS into a temp dir
+//  - an `ffmpeg` child process (Tauri sidecar) remuxing RTSP -> HLS into a temp dir
 //  - a tokio task that polls the temp dir and uploads new segments + the
 //    rolling manifest to the API
+//  - a tokio task that drains FFmpeg's stderr so its pipe buffer cannot fill
+//    and block the encoder
 //
-// Drop semantics: stopping a session kills the child and aborts the uploader;
-// the temp dir is removed when the session value goes out of scope.
+// Drop semantics: stopping a session kills the child and aborts the helper
+// tasks; the temp dir is removed when the Session value goes out of scope.
 
 use anyhow::{anyhow, Context, Result};
 use parking_lot::Mutex;
@@ -13,8 +15,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::AppHandle;
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
+use tauri_plugin_shell::ShellExt;
 use tempfile::TempDir;
-use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 
 use crate::state::ConnectorIdentity;
@@ -49,20 +53,25 @@ pub struct StartPreviewResult {
 }
 
 struct Session {
-    child: Child,
+    child: CommandChild,
     uploader: JoinHandle<()>,
+    log_drain: JoinHandle<()>,
     // Keeps the temp dir alive; auto-removed on drop.
     _temp: TempDir,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct PreviewManager {
+    app: AppHandle,
     sessions: Arc<Mutex<HashMap<String, Session>>>,
 }
 
 impl PreviewManager {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(app: AppHandle) -> Self {
+        Self {
+            app,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub async fn start(
@@ -82,40 +91,75 @@ impl PreviewManager {
         let segment_pattern = dir_path.join("seg-%04d.ts");
         let manifest_path = dir_path.join("playlist.m3u8");
 
-        let mut cmd = Command::new("ffmpeg");
-        cmd.kill_on_drop(true);
-        cmd.args([
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-rtsp_transport",
-            "tcp",
-            "-i",
-            &payload.rtsp_url,
-            // Copy video without transcoding (assumes H.264). Drop audio for
-            // pilot; some IP cameras emit unsupported audio codecs that break
-            // mux. Re-evaluate when we hit a partner camera that needs sound.
-            "-c:v",
-            "copy",
-            "-an",
-            "-f",
-            "hls",
-            "-hls_time",
-            &payload.segment_seconds.to_string(),
-            "-hls_list_size",
-            &payload.window_segments.to_string(),
-            "-hls_flags",
-            "delete_segments+omit_endlist+independent_segments",
-            "-hls_segment_filename",
-        ]);
-        cmd.arg(&segment_pattern);
-        cmd.args(["-t", &payload.max_duration_seconds.to_string()]);
-        cmd.arg(&manifest_path);
+        let sidecar = self.app.shell().sidecar("ffmpeg").map_err(|e| {
+            anyhow!(
+                "locate bundled ffmpeg sidecar ({e}) — run `pnpm --filter @surveillance/connector-tauri fetch:ffmpeg`"
+            )
+        })?;
 
-        let child = cmd
+        // Copy video without transcoding (assumes H.264). Drop audio for
+        // pilot; some IP cameras emit unsupported audio codecs that break
+        // mux. Re-evaluate when we hit a partner camera that needs sound.
+        let args: Vec<String> = vec![
+            "-nostdin".into(),
+            "-hide_banner".into(),
+            "-loglevel".into(),
+            "warning".into(),
+            "-rtsp_transport".into(),
+            "tcp".into(),
+            "-i".into(),
+            payload.rtsp_url.clone(),
+            "-c:v".into(),
+            "copy".into(),
+            "-an".into(),
+            "-f".into(),
+            "hls".into(),
+            "-hls_time".into(),
+            payload.segment_seconds.to_string(),
+            "-hls_list_size".into(),
+            payload.window_segments.to_string(),
+            "-hls_flags".into(),
+            "delete_segments+omit_endlist+independent_segments".into(),
+            "-hls_segment_filename".into(),
+            segment_pattern.to_string_lossy().into_owned(),
+            "-t".into(),
+            payload.max_duration_seconds.to_string(),
+            manifest_path.to_string_lossy().into_owned(),
+        ];
+
+        let (mut rx, child) = sidecar
+            .args(args)
             .spawn()
-            .map_err(|e| anyhow!("spawn ffmpeg ({e}) — is ffmpeg on PATH?"))?;
+            .map_err(|e| anyhow!("spawn ffmpeg sidecar: {e}"))?;
+
+        // Drain FFmpeg's stderr so a full pipe buffer cannot block the encoder,
+        // and surface unexpected exits in the connector log.
+        let log_preview_id = payload.preview_id.clone();
+        let log_drain = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    CommandEvent::Stderr(bytes) => {
+                        eprintln!(
+                            "ffmpeg ({log_preview_id}): {}",
+                            String::from_utf8_lossy(&bytes).trim_end()
+                        );
+                    }
+                    CommandEvent::Error(err) => {
+                        eprintln!("ffmpeg ({log_preview_id}) error: {err}");
+                    }
+                    CommandEvent::Terminated(payload) => {
+                        if !matches!(payload.code, Some(0)) {
+                            eprintln!(
+                                "ffmpeg ({log_preview_id}) exited (code {:?}, signal {:?})",
+                                payload.code, payload.signal
+                            );
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
 
         let uploader_identity = identity.clone();
         let uploader_preview_id = payload.preview_id.clone();
@@ -126,7 +170,7 @@ impl PreviewManager {
 
         self.sessions.lock().insert(
             payload.preview_id.clone(),
-            Session { child, uploader, _temp: temp },
+            Session { child, uploader, log_drain, _temp: temp },
         );
 
         Ok(StartPreviewResult { started_at: now_iso8601() })
@@ -134,9 +178,10 @@ impl PreviewManager {
 
     pub async fn stop(&self, preview_id: &str) -> Result<()> {
         let session = self.sessions.lock().remove(preview_id);
-        if let Some(mut session) = session {
-            let _ = session.child.kill().await;
-            session.uploader.abort();
+        if let Some(Session { child, uploader, log_drain, _temp: _ }) = session {
+            let _ = child.kill();
+            uploader.abort();
+            log_drain.abort();
             // _temp dropped here, removes the directory.
         }
         Ok(())

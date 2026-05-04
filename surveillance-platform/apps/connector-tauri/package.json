@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "tauri": "tauri",
+    "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
+    "pretauri:dev": "node scripts/fetch-ffmpeg.mjs",
     "tauri:dev": "tauri dev",
+    "pretauri:build": "node scripts/fetch-ffmpeg.mjs",
     "tauri:build": "tauri build",
     "typecheck": "tsc --noEmit",
     "lint": "echo skip"
