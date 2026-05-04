@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use crate::{rtsp, state::ConnectorIdentity};
 
+const PLACEHOLDER_JPEG: &[u8] = include_bytes!("../assets/placeholder.jpg");
+
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Command {
@@ -49,7 +51,7 @@ struct CommandResult {
 /// Spawn the polling loop for a paired connector. Idempotent for a given identity:
 /// callers should ensure they don't spawn twice.
 pub fn spawn(_existing: Option<ConnectorIdentity>, identity: ConnectorIdentity) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let client = reqwest::Client::new();
         loop {
             match poll_once(&client, &identity).await {
@@ -95,6 +97,13 @@ async fn handle_command(
     let (command_id, status, validate, error) = match command {
         Command::ValidateRtsp { id, payload } | Command::CaptureSnapshot { id, payload } => {
             match rtsp::validate(&payload.rtsp_url, Duration::from_millis(payload.timeout_ms)).await {
+                Ok(mut result) if result.reachable => {
+                    let key = upload_placeholder_snapshot(client, identity, &payload.camera_id)
+                        .await
+                        .ok();
+                    result.snapshot_upload_key = key;
+                    (id, "ok", Some(result), None)
+                }
                 Ok(result) => (id, "ok", Some(result), None),
                 Err(e) => (id, "failed", None, Some(e.to_string())),
             }
@@ -124,6 +133,34 @@ async fn handle_command(
         .await?
         .error_for_status()?;
     Ok(())
+}
+
+async fn upload_placeholder_snapshot(
+    client: &reqwest::Client,
+    identity: &ConnectorIdentity,
+    camera_id: &str,
+) -> anyhow::Result<String> {
+    let key = format!(
+        "snap_{}_{}",
+        camera_id.replace('-', ""),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis()
+    );
+    client
+        .put(format!(
+            "{}/v1/connectors/uploads/{}",
+            identity.api_base_url.trim_end_matches('/'),
+            key
+        ))
+        .bearer_auth(&identity.connector_token)
+        .header("x-connector-id", &identity.connector_id)
+        .header("content-type", "image/jpeg")
+        .body(PLACEHOLDER_JPEG.to_vec())
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(key)
 }
 
 fn chrono_like_now() -> String {

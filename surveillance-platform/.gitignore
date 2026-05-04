@@ -5,6 +5,7 @@ build
 .turbo
 out
 coverage
+*.tsbuildinfo
 .env
 .env.local
 .env.*.local

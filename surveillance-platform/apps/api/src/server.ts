@@ -16,6 +16,12 @@ async function main() {
   await app.register(cors, { origin: true });
   await app.register(multipart, { limits: { fileSize: 25 * 1024 * 1024 } });
 
+  // Snapshot uploads stream raw image bytes; bypass body parsing so the route handler can read req.raw.
+  app.addContentTypeParser(
+    ["image/jpeg", "image/png", "application/octet-stream"],
+    (_req, _payload, done) => done(null),
+  );
+
   registerHealthRoutes(app);
   registerPairingRoutes(app);
   registerConnectorRoutes(app);

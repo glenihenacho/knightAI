@@ -67,7 +67,7 @@ export class ConnectorClient {
       {
         method: "PUT",
         headers: { ...this.authHeaders(), "content-type": upload.contentType },
-        body: upload.bytes,
+        body: upload.bytes as BodyInit,
       },
     );
     if (!res.ok) {

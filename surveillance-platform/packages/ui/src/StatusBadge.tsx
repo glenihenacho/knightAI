@@ -1,6 +1,8 @@
 import type { ConnectorStatus } from "@surveillance/shared";
 
-const COLORS: Record<ConnectorStatus, { bg: string; fg: string; label: string }> = {
+type Style = { bg: string; fg: string; label: string };
+
+const COLORS: Record<ConnectorStatus, Style> = {
   pending: { bg: "#fef3c7", fg: "#92400e", label: "Pending" },
   online: { bg: "#dcfce7", fg: "#166534", label: "Online" },
   offline: { bg: "#fee2e2", fg: "#991b1b", label: "Offline" },
@@ -8,7 +10,7 @@ const COLORS: Record<ConnectorStatus, { bg: string; fg: string; label: string }>
 };
 
 export function StatusBadge({ status }: { status: ConnectorStatus }) {
-  const c = COLORS[status];
+  const c: Style = COLORS[status];
   return (
     <span
       style={{

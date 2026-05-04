@@ -13,6 +13,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "echo skip"
   },
+  "dependencies": {
+    "@surveillance/shared": "workspace:*"
+  },
   "peerDependencies": {
     "react": "^18.3.0"
   },
