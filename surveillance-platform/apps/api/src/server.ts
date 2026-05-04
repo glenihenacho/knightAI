@@ -71,6 +71,21 @@ async function main() {
 
   await app.listen({ port: env.PORT, host: "0.0.0.0" });
   app.log.info(`api listening on :${env.PORT}`);
+
+  // Fly sends SIGTERM and waits ~5s before SIGKILL during rolling deploys.
+  // Closing Fastify drains in-flight requests instead of dropping them.
+  const shutdown = async (signal: string) => {
+    app.log.info({ signal }, "shutting down");
+    try {
+      await app.close();
+      process.exit(0);
+    } catch (err) {
+      app.log.error({ err }, "error during shutdown");
+      process.exit(1);
+    }
+  };
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
 main().catch((err) => {

@@ -1,0 +1,54 @@
+# Fly.io app config for the surveillance API.
+#
+# Deploy from the workspace root so the Docker build context includes the
+# pnpm workspace + lockfile:
+#
+#   fly deploy --config infra/deploy/fly.toml --dockerfile infra/docker/Dockerfile.api
+#
+# First-time setup is in docs/onboarding/deploy.md. Set secrets with
+# `fly secrets set` before the first deploy — the release_command runs
+# pending migrations and will fail without DATABASE_URL.
+
+app = "surveillance-api"
+primary_region = "iad"
+
+[build]
+  dockerfile = "../docker/Dockerfile.api"
+
+[deploy]
+  # Apply pending migrations once per deploy, before any instance starts
+  # serving. Avoids races between rolling-deploy instances each running
+  # MIGRATE_ON_BOOT.
+  release_command = "node dist/db/migrate.js"
+  strategy = "rolling"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "4000"
+  # release_command handles migrations; instances should not.
+  MIGRATE_ON_BOOT = "false"
+  # Cookies cross-subdomain only when Secure + Domain attribute are set.
+  # Override these via `fly secrets set` if your domain layout differs.
+  SESSION_COOKIE_SECURE = "true"
+  S3_FORCE_PATH_STYLE = "true"
+  # PUBLIC_BASE_URL, DASHBOARD_BASE_URL, SESSION_COOKIE_DOMAIN, RESEND_FROM_EMAIL
+  # are environment-specific — set via `fly secrets set` so they're not in git.
+
+[http_service]
+  internal_port = 4000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "3s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

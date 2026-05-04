@@ -1,21 +1,39 @@
+# syntax=docker/dockerfile:1.7
+# API container for Fly.io. Build context is the workspace root so pnpm can
+# resolve workspace-protocol dependencies. Pair with .dockerignore at the
+# workspace root to keep the context small.
+
 FROM node:20-alpine AS base
 WORKDIR /repo
 RUN corepack enable
 
+# --- deps: install only what the api needs, with a frozen lockfile ---
 FROM base AS deps
-COPY package.json pnpm-workspace.yaml turbo.json tsconfig.base.json ./
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json tsconfig.base.json ./
 COPY apps/api/package.json apps/api/
 COPY packages/shared/package.json packages/shared/
 COPY packages/camera-core/package.json packages/camera-core/
-RUN pnpm install --frozen-lockfile=false
+RUN pnpm install --frozen-lockfile --filter @surveillance/api...
 
+# --- build: compile TS to apps/api/dist ---
 FROM deps AS build
-COPY . .
+COPY packages/shared packages/shared
+COPY packages/camera-core packages/camera-core
+COPY apps/api apps/api
+COPY infra/database/migrations infra/database/migrations
 RUN pnpm --filter @surveillance/api build
 
+# --- runtime: slim image with tini for proper signal forwarding ---
 FROM node:20-alpine AS runtime
-WORKDIR /app
-COPY --from=build /repo /repo
+RUN apk add --no-cache tini && \
+    addgroup -S app && adduser -S -G app app
+WORKDIR /repo
+COPY --from=build --chown=app:app /repo /repo
 WORKDIR /repo/apps/api
+ENV NODE_ENV=production \
+    PORT=4000 \
+    MIGRATIONS_DIR=/repo/infra/database/migrations
+USER app
 EXPOSE 4000
+ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "dist/server.js"]

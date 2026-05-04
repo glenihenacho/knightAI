@@ -1,0 +1,33 @@
+# Workspace .dockerignore — keep API build context lean and reproducible.
+
+# Dependency trees and tool caches
+**/node_modules
+**/.pnpm-store
+**/.turbo
+
+# Compiled outputs (the Dockerfile builds inside the image)
+**/dist
+**/.next
+**/build
+**/out
+**/coverage
+**/*.tsbuildinfo
+
+# Tauri / Rust artifacts (not part of the API image)
+apps/connector-tauri/src-tauri/target
+apps/connector-tauri/src-tauri/binaries
+apps/connector-tauri/src-tauri/gen
+
+# Local-only files
+.git
+.github
+.vscode
+.idea
+.DS_Store
+**/.env
+**/.env.*
+**/*.log
+
+# Docs and developer scaffolding don't belong in a runtime image
+docs
+README.md
