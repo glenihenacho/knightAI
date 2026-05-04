@@ -6,9 +6,9 @@ import {
   type Command,
 } from "@surveillance/shared";
 import { parseRtspUrl, RtspUrlError } from "@surveillance/camera-core";
-import { store } from "../db/store.js";
+import type { Store } from "../db/store.js";
 
-export function registerCameraRoutes(app: FastifyInstance): void {
+export function registerCameraRoutes(app: FastifyInstance, store: Store): void {
   app.post("/v1/cameras", async (req, reply) => {
     const body = CreateCameraRequestSchema.parse(req.body);
     try {
@@ -20,12 +20,12 @@ export function registerCameraRoutes(app: FastifyInstance): void {
       throw err;
     }
 
-    const connector = store.connectors.get(body.connectorId);
+    const connector = await store.getConnector(body.connectorId);
     if (!connector) {
       return reply.code(404).send({ error: "connector not found" });
     }
 
-    const camera: Camera = {
+    const draft: Camera = {
       id: randomUUID(),
       connectorId: body.connectorId,
       label: body.label,
@@ -35,7 +35,7 @@ export function registerCameraRoutes(app: FastifyInstance): void {
       lastSnapshotKey: null,
       errorMessage: null,
     };
-    store.cameras.set(camera.id, camera);
+    const camera = await store.createCamera(draft);
 
     const command: Command = {
       id: randomUUID(),
@@ -47,12 +47,12 @@ export function registerCameraRoutes(app: FastifyInstance): void {
         timeoutMs: 15_000,
       },
     };
-    store.enqueueCommand(body.connectorId, command);
+    await store.enqueueCommand(body.connectorId, command, camera.id);
 
     return reply.code(201).send({ camera, queuedCommandId: command.id });
   });
 
   app.get("/v1/cameras", async () => ({
-    cameras: [...store.cameras.values()],
+    cameras: await store.listCameras(),
   }));
 }
