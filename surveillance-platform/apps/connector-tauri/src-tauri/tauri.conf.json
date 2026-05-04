@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Surveillance Connector",
+  "version": "0.1.0",
+  "identifier": "com.surveillance.connector",
+  "build": {
+    "beforeDevCommand": "pnpm --filter @surveillance/connector-tauri dev",
+    "beforeBuildCommand": "pnpm --filter @surveillance/connector-tauri build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Surveillance Connector",
+        "width": 720,
+        "height": 540,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png"]
+  }
+}
