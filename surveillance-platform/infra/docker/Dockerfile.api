@@ -21,7 +21,8 @@ COPY packages/shared packages/shared
 COPY packages/camera-core packages/camera-core
 COPY apps/api apps/api
 COPY infra/database/migrations infra/database/migrations
-RUN pnpm --filter @surveillance/api build
+RUN pnpm --filter @surveillance/shared --filter @surveillance/camera-core build \
+ && pnpm --filter @surveillance/api build
 
 # --- runtime: slim image with tini for proper signal forwarding ---
 FROM node:20-alpine AS runtime
