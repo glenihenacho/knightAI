@@ -5,9 +5,11 @@ import type {
   Command,
   Connector,
   ConnectorStatus,
+  Invite,
   Preview,
   PreviewStatus,
   User,
+  UserRole,
 } from "@surveillance/shared";
 import { getPool, withTx } from "./client.js";
 
@@ -39,6 +41,24 @@ export interface CommandRowRef {
 export interface IssuedToken {
   token: string;
   expiresAt: string;
+}
+
+export interface IssuedMagicLink extends IssuedToken {
+  magicLinkId: string;
+}
+
+export interface IssuedInvite {
+  invite: Invite;
+  token: string;
+  expiresAt: string;
+}
+
+export interface CreateInviteInput {
+  email: string;
+  organizationId: string;
+  role: UserRole;
+  createdByUserId: string;
+  ttlSeconds: number;
 }
 
 export interface SessionPrincipal {
@@ -99,17 +119,26 @@ export interface Store {
 
   // Operator auth (dashboard).
   findUserByEmail(email: string): Promise<User | null>;
-  // Resolves the user for a magic-link verify. Creates the user if absent,
-  // assigning them to the unique organization. If 0 or >1 orgs exist this
-  // throws — invites/multi-tenancy is intentionally not implemented yet.
-  findOrCreateUserForLogin(email: string): Promise<User>;
+  // Bootstraps the first admin during the SEED_ORGANIZATION_NAME path.
+  // Idempotent in the caller (server.ts only invokes this when the org is
+  // being created fresh, so no race with subsequent boots).
+  createSeedAdmin(organizationId: string, email: string): Promise<User>;
   // Issues a single-use magic link valid for ttlSeconds. The raw token is
-  // returned for embedding in the email; only its hash is persisted.
-  createMagicLink(email: string, ttlSeconds: number): Promise<IssuedToken>;
-  // Atomically consumes a magic link, returning the bound email if the link
-  // exists, hasn't expired, and hasn't been used. Marks used_at = now() so a
-  // single token can never grant two sessions.
-  consumeMagicLink(token: string): Promise<{ email: string } | null>;
+  // returned for embedding in the email; only its hash is persisted. The
+  // magic_link row id is returned so callers can bind an invite to it.
+  createMagicLink(email: string, ttlSeconds: number): Promise<IssuedMagicLink>;
+  // Atomically consumes a magic link, returning the bound email + row id if
+  // the link exists, hasn't expired, and hasn't been used. Marks
+  // used_at = now() so a single token can never grant two sessions.
+  consumeMagicLink(token: string): Promise<{ email: string; magicLinkId: string } | null>;
+
+  // Invites — admin-issued, bound 1:1 to a magic_links row.
+  createInvite(input: CreateInviteInput): Promise<IssuedInvite>;
+  findInviteByMagicLinkId(magicLinkId: string): Promise<Invite | null>;
+  // Atomically inserts a user under the invite's org/role and marks the
+  // invite consumed. Throws if a user with that email already exists.
+  provisionUserFromInvite(invite: Invite): Promise<User>;
+  listInvitesForOrg(organizationId: string): Promise<Invite[]>;
   // Issues a session cookie token valid for ttlSeconds; raw token returned for
   // the Set-Cookie header.
   createSession(userId: string, ttlSeconds: number): Promise<IssuedToken>;
@@ -222,6 +251,7 @@ interface UserRow {
   organization_id: string;
   email: string;
   display_name: string | null;
+  role: UserRole;
   created_at: Date;
 }
 
@@ -231,6 +261,30 @@ function rowToUser(row: UserRow): User {
     organizationId: row.organization_id,
     email: row.email,
     displayName: row.display_name,
+    role: row.role,
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+interface InviteRow {
+  id: string;
+  email: string;
+  organization_id: string;
+  role: UserRole;
+  magic_link_id: string;
+  created_by_user_id: string;
+  consumed_at: Date | null;
+  created_at: Date;
+}
+
+function rowToInvite(row: InviteRow): Invite {
+  return {
+    id: row.id,
+    email: row.email,
+    organizationId: row.organization_id,
+    role: row.role,
+    createdByUserId: row.created_by_user_id,
+    consumedAt: row.consumed_at?.toISOString() ?? null,
     createdAt: row.created_at.toISOString(),
   };
 }
@@ -570,69 +624,122 @@ export function createStore(databaseUrl: string): Store {
 
     async findUserByEmail(email) {
       const { rows } = await pool.query<UserRow>(
-        `SELECT id, organization_id, email, display_name, created_at
+        `SELECT id, organization_id, email, display_name, role, created_at
            FROM users WHERE email = $1`,
         [normalizeEmail(email)],
       );
       return rows[0] ? rowToUser(rows[0]) : null;
     },
 
-    async findOrCreateUserForLogin(email) {
-      const normalized = normalizeEmail(email);
-      return withTx(pool, async (client) => {
-        const existing = await client.query<UserRow>(
-          `SELECT id, organization_id, email, display_name, created_at
-             FROM users WHERE email = $1`,
-          [normalized],
-        );
-        if (existing.rows[0]) return rowToUser(existing.rows[0]);
-
-        const orgs = await client.query<{ id: string }>(
-          "SELECT id FROM organizations ORDER BY created_at LIMIT 2",
-        );
-        if (orgs.rows.length === 0) {
-          throw new Error("no organization exists; cannot provision user");
-        }
-        if (orgs.rows.length > 1) {
-          throw new Error(
-            "multiple organizations exist; refusing to auto-assign. invite flow not implemented",
-          );
-        }
-        const orgId = orgs.rows[0]!.id;
-        const inserted = await client.query<UserRow>(
-          `INSERT INTO users (organization_id, email)
-           VALUES ($1, $2)
-           RETURNING id, organization_id, email, display_name, created_at`,
-          [orgId, normalized],
-        );
-        return rowToUser(inserted.rows[0]!);
-      });
+    async createSeedAdmin(organizationId, email) {
+      const { rows } = await pool.query<UserRow>(
+        `INSERT INTO users (organization_id, email, role)
+         VALUES ($1, $2, 'admin')
+         RETURNING id, organization_id, email, display_name, role, created_at`,
+        [organizationId, normalizeEmail(email)],
+      );
+      return rowToUser(rows[0]!);
     },
 
     async createMagicLink(email, ttlSeconds) {
       const token = randomBytes(32).toString("hex");
       const tokenHash = hashToken(token);
       const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
-      await pool.query(
+      const { rows } = await pool.query<{ id: string }>(
         `INSERT INTO magic_links (email, token_hash, expires_at)
-         VALUES ($1, $2, $3)`,
+         VALUES ($1, $2, $3)
+         RETURNING id`,
         [normalizeEmail(email), tokenHash, expiresAt],
       );
-      return { token, expiresAt: expiresAt.toISOString() };
+      return { magicLinkId: rows[0]!.id, token, expiresAt: expiresAt.toISOString() };
     },
 
     async consumeMagicLink(token) {
       const tokenHash = hashToken(token);
-      const { rows } = await pool.query<{ email: string }>(
+      const { rows } = await pool.query<{ id: string; email: string }>(
         `UPDATE magic_links
             SET used_at = now()
           WHERE token_hash = $1
             AND used_at IS NULL
             AND expires_at > now()
-          RETURNING email`,
+          RETURNING id, email`,
         [tokenHash],
       );
-      return rows[0] ? { email: rows[0].email } : null;
+      return rows[0] ? { magicLinkId: rows[0].id, email: rows[0].email } : null;
+    },
+
+    async createInvite({ email, organizationId, role, createdByUserId, ttlSeconds }) {
+      const normalized = normalizeEmail(email);
+      const token = randomBytes(32).toString("hex");
+      const tokenHash = hashToken(token);
+      const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
+      return withTx(pool, async (client) => {
+        const linkRows = await client.query<{ id: string }>(
+          `INSERT INTO magic_links (email, token_hash, expires_at)
+           VALUES ($1, $2, $3)
+           RETURNING id`,
+          [normalized, tokenHash, expiresAt],
+        );
+        const magicLinkId = linkRows.rows[0]!.id;
+        const inviteRows = await client.query<InviteRow>(
+          `INSERT INTO invites
+             (email, organization_id, role, magic_link_id, created_by_user_id)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, email, organization_id, role, magic_link_id,
+                     created_by_user_id, consumed_at, created_at`,
+          [normalized, organizationId, role, magicLinkId, createdByUserId],
+        );
+        return {
+          invite: rowToInvite(inviteRows.rows[0]!),
+          token,
+          expiresAt: expiresAt.toISOString(),
+        };
+      });
+    },
+
+    async findInviteByMagicLinkId(magicLinkId) {
+      const { rows } = await pool.query<InviteRow>(
+        `SELECT id, email, organization_id, role, magic_link_id,
+                created_by_user_id, consumed_at, created_at
+           FROM invites WHERE magic_link_id = $1`,
+        [magicLinkId],
+      );
+      return rows[0] ? rowToInvite(rows[0]) : null;
+    },
+
+    async provisionUserFromInvite(invite) {
+      return withTx(pool, async (client) => {
+        const existing = await client.query<{ id: string }>(
+          "SELECT id FROM users WHERE email = $1",
+          [invite.email],
+        );
+        if (existing.rows[0]) {
+          throw new Error(`user already exists for email ${invite.email}`);
+        }
+        const userRows = await client.query<UserRow>(
+          `INSERT INTO users (organization_id, email, role)
+           VALUES ($1, $2, $3)
+           RETURNING id, organization_id, email, display_name, role, created_at`,
+          [invite.organizationId, invite.email, invite.role],
+        );
+        await client.query(
+          "UPDATE invites SET consumed_at = now() WHERE id = $1",
+          [invite.id],
+        );
+        return rowToUser(userRows.rows[0]!);
+      });
+    },
+
+    async listInvitesForOrg(organizationId) {
+      const { rows } = await pool.query<InviteRow>(
+        `SELECT id, email, organization_id, role, magic_link_id,
+                created_by_user_id, consumed_at, created_at
+           FROM invites
+          WHERE organization_id = $1
+          ORDER BY created_at DESC`,
+        [organizationId],
+      );
+      return rows.map(rowToInvite);
     },
 
     async createSession(userId, ttlSeconds) {
@@ -655,6 +762,7 @@ export function createStore(databaseUrl: string): Store {
         organization_id: string;
         email: string;
         display_name: string | null;
+        role: UserRole;
         user_created_at: Date;
       }>(
         `UPDATE sessions s
@@ -668,6 +776,7 @@ export function createStore(databaseUrl: string): Store {
                     u.organization_id,
                     u.email,
                     u.display_name,
+                    u.role,
                     u.created_at AS user_created_at`,
         [tokenHash],
       );
@@ -680,6 +789,7 @@ export function createStore(databaseUrl: string): Store {
           organization_id: row.organization_id,
           email: row.email,
           display_name: row.display_name,
+          role: row.role,
           created_at: row.user_created_at,
         }),
       };

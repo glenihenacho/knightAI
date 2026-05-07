@@ -20,7 +20,14 @@ export default async function AuthedLayout({ children }: { children: ReactNode }
         <Link href="/" style={{ color: "inherit", textDecoration: "none" }}>
           <strong>Surveillance Platform</strong>
         </Link>
-        <UserBar email={me.user.email} />
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          {me.user.role === "admin" && (
+            <Link href="/admin/invites" style={{ color: "inherit" }}>
+              Invites
+            </Link>
+          )}
+          <UserBar email={me.user.email} />
+        </div>
       </header>
       <main style={{ maxWidth: 960, margin: "0 auto", padding: 24 }}>{children}</main>
     </>

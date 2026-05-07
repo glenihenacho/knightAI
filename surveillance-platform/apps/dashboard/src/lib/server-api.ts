@@ -37,3 +37,12 @@ export async function listCamerasServer() {
     throw err;
   }
 }
+
+export async function listInvitesServer() {
+  try {
+    return await api.listInvites({ cookie: cookieHeader() });
+  } catch (err) {
+    if (err instanceof UnauthorizedError) redirect("/login");
+    throw err;
+  }
+}

@@ -45,3 +45,21 @@ export async function requireOperator(
   }
   return principal.user;
 }
+
+/**
+ * Like requireOperator but additionally requires role === "admin".
+ * Replies 403 to authenticated non-admins.
+ */
+export async function requireAdmin(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  store: Store,
+): Promise<User | null> {
+  const user = await requireOperator(req, reply, store);
+  if (!user) return null;
+  if (user.role !== "admin") {
+    reply.code(403).send({ error: "admin required" });
+    return null;
+  }
+  return user;
+}

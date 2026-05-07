@@ -15,6 +15,7 @@ import { registerCommandRoutes } from "./routes/commands.js";
 import { registerUploadRoutes } from "./routes/uploads.js";
 import { registerOrganizationRoutes } from "./routes/organizations.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerInviteRoutes } from "./routes/invites.js";
 import { registerPreviewRoutes } from "./routes/previews.js";
 
 async function main() {
@@ -56,12 +57,17 @@ async function main() {
     if (existing.length === 0) {
       const org = await store.createOrganization(env.SEED_ORGANIZATION_NAME);
       app.log.info({ organizationId: org.id }, `seeded organization "${env.SEED_ORGANIZATION_NAME}"`);
+      if (env.SEED_ADMIN_EMAIL) {
+        const admin = await store.createSeedAdmin(org.id, env.SEED_ADMIN_EMAIL);
+        app.log.info({ userId: admin.id, email: admin.email }, "seeded admin user");
+      }
     }
   }
 
   registerHealthRoutes(app);
   registerAuthRoutes(app, store, env, email);
   registerOrganizationRoutes(app, store);
+  registerInviteRoutes(app, store, env, email);
   registerPairingRoutes(app, store, env);
   registerConnectorRoutes(app, store);
   registerCameraRoutes(app, store);

@@ -20,6 +20,7 @@ const S3_PORT = 19000;
 const DASHBOARD_BASE_URL = "http://127.0.0.1:13000";
 const SEED_ORG_NAME = "Acme";
 const OPERATOR_EMAIL = "operator@example.com";
+const MEMBER_EMAIL = "member@example.com";
 const DATABASE_URL =
   process.env.DATABASE_URL ?? "postgres://surveillance:surveillance@127.0.0.1:5432/surveillance";
 
@@ -34,6 +35,7 @@ async function wipeDb() {
   const client = new Client({ connectionString: DATABASE_URL });
   await client.connect();
   await client.query(`
+    DROP TABLE IF EXISTS invites CASCADE;
     DROP TABLE IF EXISTS sessions CASCADE;
     DROP TABLE IF EXISTS magic_links CASCADE;
     DROP TABLE IF EXISTS users CASCADE;
@@ -140,6 +142,7 @@ async function startApi(): Promise<ApiHandle> {
       DASHBOARD_BASE_URL,
       MIGRATE_ON_BOOT: "true",
       SEED_ORGANIZATION_NAME: SEED_ORG_NAME,
+      SEED_ADMIN_EMAIL: OPERATOR_EMAIL,
       S3_ENDPOINT: `http://127.0.0.1:${S3_PORT}`,
       S3_REGION: "us-east-1",
       S3_BUCKET: "surveillance",
@@ -186,10 +189,19 @@ async function startApi(): Promise<ApiHandle> {
 }
 
 function extractMagicLink(buffer: string[]): string | null {
+  return extractAllMagicLinks(buffer)[0] ?? null;
+}
+
+function extractAllMagicLinks(buffer: string[]): string[] {
   // Dev transport logs a Pino line containing "link":"http://.../verify?token=..."
   const joined = buffer.join("");
-  const match = joined.match(/"link":"(http[^"]+\/v1\/auth\/verify\?token=[^"]+)"/);
-  return match?.[1] ?? null;
+  const matches = joined.matchAll(/"link":"(http[^"]+\/v1\/auth\/verify\?token=[^"]+)"/g);
+  return Array.from(matches, (m) => m[1]!);
+}
+
+function extractLatestMagicLink(buffer: string[]): string | null {
+  const all = extractAllMagicLinks(buffer);
+  return all.length > 0 ? all[all.length - 1]! : null;
 }
 
 function parseSessionCookie(setCookie: string | null): string | null {
@@ -268,6 +280,7 @@ async function main() {
     const me = await meRes.json();
     check("me returns email", me.user.email === OPERATOR_EMAIL);
     check("me returns organizationId", typeof me.user.organizationId === "string");
+    check("seeded operator has admin role", me.user.role === "admin");
     const orgId = me.user.organizationId;
 
     // GET /v1/organizations returns just the operator's org.
@@ -275,6 +288,96 @@ async function main() {
     const orgs = await orgsRes.json();
     check("orgs list has exactly one entry", orgs.organizations.length === 1);
     check("orgs entry matches user", orgs.organizations[0]?.id === orgId);
+
+    // ===== Public magic-link is login-only — unknown emails get no link =====
+    const stranger = await fetch(`${API}/v1/auth/magic-link`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "stranger@example.com" }),
+    });
+    check("magic-link request for unknown email 204", stranger.status === 204);
+    await sleep(50);
+    const linksAfterStranger = extractAllMagicLinks(api.stdoutBuffer);
+    check(
+      "no link issued for unknown email",
+      linksAfterStranger.length === 1, // still just the operator's
+      linksAfterStranger.length,
+    );
+
+    // ===== Admin invites a member =====
+    const inviteRes = await fetch(`${API}/v1/invites`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        email: MEMBER_EMAIL,
+        organizationId: orgId,
+        role: "member",
+      }),
+    });
+    check("POST /v1/invites 201", inviteRes.status === 201);
+    const invite = await inviteRes.json();
+    check("invite email matches", invite.email === MEMBER_EMAIL);
+    check("invite role is member", invite.role === "member");
+    check("invite consumed_at is null", invite.consumedAt === null);
+
+    // Cross-org guard: inviting into someone else's org is 403.
+    const otherOrgInvite = await fetch(`${API}/v1/invites`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        email: "noone@example.com",
+        organizationId: "00000000-0000-0000-0000-000000000000",
+        role: "member",
+      }),
+    });
+    check("invite into different org 403", otherOrgInvite.status === 403);
+
+    // Member follows the invite link.
+    await sleep(50);
+    const inviteLink = extractLatestMagicLink(api.stdoutBuffer);
+    check("invite link logged", typeof inviteLink === "string", inviteLink);
+    if (!inviteLink) throw new Error("invite link missing");
+
+    const inviteVerifyRes = await fetch(inviteLink, { redirect: "manual" });
+    check("invite verify 302", inviteVerifyRes.status === 302);
+    const memberCookie = parseSessionCookie(inviteVerifyRes.headers.get("set-cookie"));
+    check("invite verify sets session cookie", typeof memberCookie === "string");
+    if (!memberCookie) throw new Error("member cookie missing");
+
+    // Member /me reflects role + same org.
+    const memberMeRes = await fetch(`${API}/v1/auth/me`, {
+      headers: { cookie: `surv_sess=${memberCookie}` },
+    });
+    const memberMe = await memberMeRes.json();
+    check("member me returns email", memberMe.user.email === MEMBER_EMAIL);
+    check("member me has role 'member'", memberMe.user.role === "member");
+    check("member me uses inviting org", memberMe.user.organizationId === orgId);
+
+    // Members are blocked from POST /v1/invites.
+    const memberInviteAttempt = await fetch(`${API}/v1/invites`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: `surv_sess=${memberCookie}` },
+      body: JSON.stringify({
+        email: "another@example.com",
+        organizationId: orgId,
+        role: "member",
+      }),
+    });
+    check("member POST /v1/invites 403", memberInviteAttempt.status === 403);
+
+    // Admin lists invites — sees the consumed one.
+    const listInvitesRes = await fetch(`${API}/v1/invites`, {
+      headers: { cookie: cookieHeader },
+    });
+    const listInvites = await listInvitesRes.json();
+    check(
+      "admin lists invite",
+      listInvites.invites.length === 1 && listInvites.invites[0].email === MEMBER_EMAIL,
+    );
+    check(
+      "listed invite shows consumed",
+      typeof listInvites.invites[0].consumedAt === "string",
+    );
 
     // ===== M1 flow over an authenticated session =====
     // Create pairing — body no longer carries organizationId.

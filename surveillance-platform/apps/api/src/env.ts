@@ -37,6 +37,12 @@ const EnvSchema = z.object({
   // Returns the org id in the logs so you can paste it into the dashboard.
   SEED_ORGANIZATION_NAME: z.string().optional(),
 
+  // Bootstrap admin email. Used only at the same boot moment as
+  // SEED_ORGANIZATION_NAME — when the org is being created and no users
+  // exist, an admin row is inserted for this address. After that, all new
+  // users come in via the invite flow.
+  SEED_ADMIN_EMAIL: z.string().email().optional(),
+
   // Operator auth (dashboard).
   // Where the dashboard is served from. Used as the redirect target after a
   // magic-link verify and as the allowed CORS origin for credentialed requests.

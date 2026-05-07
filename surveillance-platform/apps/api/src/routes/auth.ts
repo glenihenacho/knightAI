@@ -22,16 +22,21 @@ export function registerAuthRoutes(
   /**
    * Request a magic link by email.
    *
-   * The response is intentionally identical for known and unknown addresses to
-   * avoid leaking which emails have ever logged in. We always return 204 even
-   * if email delivery fails — failures are logged for the operator.
+   * Login-only: a link is issued only if a user already exists for the email.
+   * Unknown emails get a 204 with no email sent — the response shape is
+   * intentionally identical to avoid leaking who has ever logged in. New
+   * users come in via the admin-issued invite flow (POST /v1/invites), not
+   * through this endpoint.
    */
   app.post("/v1/auth/magic-link", async (req, reply) => {
     const body = RequestMagicLinkRequestSchema.parse(req.body);
     try {
-      const issued = await store.createMagicLink(body.email, env.MAGIC_LINK_TTL_SECONDS);
-      const link = `${env.PUBLIC_BASE_URL}/v1/auth/verify?token=${issued.token}`;
-      await email.sendMagicLink({ to: body.email, link });
+      const user = await store.findUserByEmail(body.email);
+      if (user) {
+        const issued = await store.createMagicLink(body.email, env.MAGIC_LINK_TTL_SECONDS);
+        const link = `${env.PUBLIC_BASE_URL}/v1/auth/verify?token=${issued.token}`;
+        await email.sendMagicLink({ to: body.email, link });
+      }
     } catch (err) {
       req.log.error({ err }, "magic link issuance failed");
     }
@@ -47,9 +52,21 @@ export function registerAuthRoutes(
     if (!consumed) {
       return reply.redirect(`${env.DASHBOARD_BASE_URL}/login?error=invalid-or-expired`, 302);
     }
+
+    // If an invite is bound to this magic_link, this is a first-time
+    // provisioning event. Otherwise it's a returning login.
+    const invite = await store.findInviteByMagicLinkId(consumed.magicLinkId);
     let user;
     try {
-      user = await store.findOrCreateUserForLogin(consumed.email);
+      if (invite && !invite.consumedAt) {
+        user = await store.provisionUserFromInvite(invite);
+      } else {
+        const existing = await store.findUserByEmail(consumed.email);
+        if (!existing) {
+          return reply.redirect(`${env.DASHBOARD_BASE_URL}/login?error=no-account`, 302);
+        }
+        user = existing;
+      }
     } catch (err) {
       req.log.error({ err }, "user provisioning failed during verify");
       return reply.redirect(`${env.DASHBOARD_BASE_URL}/login?error=provisioning-failed`, 302);

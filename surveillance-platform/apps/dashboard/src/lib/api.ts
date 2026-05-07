@@ -2,7 +2,9 @@ import type {
   Camera,
   Connector,
   CreateCameraRequest,
+  CreateInviteRequest,
   CreatePairingResponse,
+  Invite,
   MeResponse,
   PreviewSessionResponse,
 } from "@surveillance/shared";
@@ -93,6 +95,16 @@ export const api = {
       `/v1/previews/${encodeURIComponent(previewId)}/heartbeat`,
       { method: "POST" },
     ),
+
+  createInvite: (req: CreateInviteRequest) =>
+    call<Invite>("/v1/invites", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(req),
+    }),
+
+  listInvites: (opts: FetchOptions = {}) =>
+    call<{ invites: Invite[] }>("/v1/invites", { method: "GET" }, opts),
 };
 
 export const SNAPSHOT_URL = (key: string) => `${BASE}/v1/snapshots/${encodeURIComponent(key)}`;
