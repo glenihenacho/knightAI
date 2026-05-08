@@ -73,7 +73,7 @@ export function registerAuthRoutes(
     }
     const session = await store.createSession(user.id, env.SESSION_TTL_SECONDS);
     reply.setCookie(SESSION_COOKIE_NAME, session.token, sessionCookieOptions(env));
-    return reply.redirect(env.DASHBOARD_BASE_URL, 302);
+    return reply.redirect(`${env.DASHBOARD_BASE_URL}/dashboard`, 302);
   });
 
   app.get("/v1/auth/me", async (req, reply) => {

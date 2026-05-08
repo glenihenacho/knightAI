@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { Eyebrow, SectionHead, StatusBadge } from "@surveillance/ui";
 import { requireSession, listInvitesServer } from "@/lib/server-api";
 import { InviteForm } from "./invite-form";
 
@@ -6,45 +7,74 @@ export const dynamic = "force-dynamic";
 
 export default async function AdminInvitesPage() {
   const me = await requireSession();
-  if (me.user.role !== "admin") redirect("/");
+  if (me.user.role !== "admin") redirect("/dashboard");
   const { invites } = await listInvitesServer();
 
   return (
-    <section>
-      <h1>Invites</h1>
-      <p style={{ color: "var(--color-muted)" }}>
-        Invite a new member to <strong>{me.user.email}</strong>&rsquo;s organization.
-        They&rsquo;ll receive a one-time sign-in link.
-      </p>
+    <section style={{ display: "flex", flexDirection: "column", gap: 32 }}>
+      <SectionHead
+        eyebrow="Admin"
+        num="Invites"
+        title={
+          <>
+            Bring teammates and{" "}
+            <span style={{ color: "var(--gold)", fontStyle: "italic" }}>clients in.</span>
+          </>
+        }
+        intro={`Issue a one-time sign-in link for ${me.user.email}'s organization. Admins can do everything; clients have operator privileges (pairing, cameras, live preview) but cannot send invites or create orgs.`}
+      />
 
       <InviteForm organizationId={me.user.organizationId} />
 
-      <h2 style={{ marginTop: 32 }}>Sent invites</h2>
-      {invites.length === 0 && <p>No invites yet.</p>}
-      <ul style={{ listStyle: "none", padding: 0 }}>
-        {invites.map((i) => (
-          <li
-            key={i.id}
-            style={{
-              padding: 12,
-              borderBottom: "1px solid var(--color-border)",
-              display: "flex",
-              justifyContent: "space-between",
-            }}
-          >
-            <span>
-              <strong>{i.email}</strong>
-              <br />
-              <small style={{ color: "var(--color-muted)" }}>
-                role: {i.role} · sent {new Date(i.createdAt).toLocaleString()}
-              </small>
-            </span>
-            <span style={{ color: i.consumedAt ? "green" : "var(--color-muted)" }}>
-              {i.consumedAt ? "accepted" : "pending"}
-            </span>
-          </li>
-        ))}
-      </ul>
+      <div>
+        <Eyebrow>Sent invites</Eyebrow>
+        {invites.length === 0 && (
+          <p style={{ color: "var(--ink-2)", marginTop: 12 }}>No invites yet.</p>
+        )}
+        <div style={{ marginTop: 16, border: invites.length > 0 ? "1px solid var(--rule)" : "none" }}>
+          {invites.map((i, idx) => (
+            <div
+              key={i.id}
+              style={{
+                padding: "16px 20px",
+                display: "grid",
+                gridTemplateColumns: "1fr auto auto",
+                gap: 16,
+                alignItems: "center",
+                borderBottom: idx === invites.length - 1 ? "none" : "1px solid var(--rule)",
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 500 }}>{i.email}</div>
+                <div
+                  style={{
+                    fontFamily: "var(--font-mono), 'JetBrains Mono', monospace",
+                    fontSize: 10,
+                    letterSpacing: "0.14em",
+                    textTransform: "uppercase",
+                    color: "var(--ink-2)",
+                    marginTop: 4,
+                  }}
+                >
+                  Role {i.role} · sent {new Date(i.createdAt).toLocaleString()}
+                </div>
+              </div>
+              <span
+                style={{
+                  fontFamily: "var(--font-mono), 'JetBrains Mono', monospace",
+                  fontSize: 11,
+                  letterSpacing: "0.14em",
+                  textTransform: "uppercase",
+                  color: i.consumedAt ? "var(--green)" : "var(--ink-2)",
+                }}
+              >
+                {i.consumedAt ? "accepted" : "pending"}
+              </span>
+              <StatusBadge status={i.consumedAt ? "online" : "pending"} />
+            </div>
+          ))}
+        </div>
+      </div>
     </section>
   );
 }

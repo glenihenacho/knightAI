@@ -20,7 +20,7 @@ const S3_PORT = 19000;
 const DASHBOARD_BASE_URL = "http://127.0.0.1:13000";
 const SEED_ORG_NAME = "Acme";
 const OPERATOR_EMAIL = "operator@example.com";
-const MEMBER_EMAIL = "member@example.com";
+const CLIENT_EMAIL = "client@example.com";
 const DATABASE_URL =
   process.env.DATABASE_URL ?? "postgres://surveillance:surveillance@127.0.0.1:5432/surveillance";
 
@@ -260,7 +260,10 @@ async function main() {
     // Verify with the real token: 302 to dashboard with Set-Cookie.
     const verifyRes = await fetch(link, { redirect: "manual" });
     check("verify with real token 302", verifyRes.status === 302);
-    check("verify lands on dashboard root", verifyRes.headers.get("location") === DASHBOARD_BASE_URL);
+    check(
+      "verify lands on /dashboard",
+      verifyRes.headers.get("location") === `${DASHBOARD_BASE_URL}/dashboard`,
+    );
     const sessionCookie = parseSessionCookie(verifyRes.headers.get("set-cookie"));
     check("Set-Cookie contains surv_sess", typeof sessionCookie === "string" && sessionCookie.length > 0);
     if (!sessionCookie) throw new Error("session cookie missing");
@@ -304,20 +307,20 @@ async function main() {
       linksAfterStranger.length,
     );
 
-    // ===== Admin invites a member =====
+    // ===== Admin invites a client =====
     const inviteRes = await fetch(`${API}/v1/invites`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookieHeader },
       body: JSON.stringify({
-        email: MEMBER_EMAIL,
+        email: CLIENT_EMAIL,
         organizationId: orgId,
-        role: "member",
+        role: "client",
       }),
     });
     check("POST /v1/invites 201", inviteRes.status === 201);
     const invite = await inviteRes.json();
-    check("invite email matches", invite.email === MEMBER_EMAIL);
-    check("invite role is member", invite.role === "member");
+    check("invite email matches", invite.email === CLIENT_EMAIL);
+    check("invite role is client", invite.role === "client");
     check("invite consumed_at is null", invite.consumedAt === null);
 
     // Cross-org guard: inviting into someone else's org is 403.
@@ -327,12 +330,12 @@ async function main() {
       body: JSON.stringify({
         email: "noone@example.com",
         organizationId: "00000000-0000-0000-0000-000000000000",
-        role: "member",
+        role: "client",
       }),
     });
     check("invite into different org 403", otherOrgInvite.status === 403);
 
-    // Member follows the invite link.
+    // Client follows the invite link.
     await sleep(50);
     const inviteLink = extractLatestMagicLink(api.stdoutBuffer);
     check("invite link logged", typeof inviteLink === "string", inviteLink);
@@ -340,30 +343,46 @@ async function main() {
 
     const inviteVerifyRes = await fetch(inviteLink, { redirect: "manual" });
     check("invite verify 302", inviteVerifyRes.status === 302);
-    const memberCookie = parseSessionCookie(inviteVerifyRes.headers.get("set-cookie"));
-    check("invite verify sets session cookie", typeof memberCookie === "string");
-    if (!memberCookie) throw new Error("member cookie missing");
+    check(
+      "invite verify lands on /dashboard",
+      inviteVerifyRes.headers.get("location") === `${DASHBOARD_BASE_URL}/dashboard`,
+    );
+    const clientCookie = parseSessionCookie(inviteVerifyRes.headers.get("set-cookie"));
+    check("invite verify sets session cookie", typeof clientCookie === "string");
+    if (!clientCookie) throw new Error("client cookie missing");
 
-    // Member /me reflects role + same org.
-    const memberMeRes = await fetch(`${API}/v1/auth/me`, {
-      headers: { cookie: `surv_sess=${memberCookie}` },
+    // Client /me reflects role + same org.
+    const clientMeRes = await fetch(`${API}/v1/auth/me`, {
+      headers: { cookie: `surv_sess=${clientCookie}` },
     });
-    const memberMe = await memberMeRes.json();
-    check("member me returns email", memberMe.user.email === MEMBER_EMAIL);
-    check("member me has role 'member'", memberMe.user.role === "member");
-    check("member me uses inviting org", memberMe.user.organizationId === orgId);
+    const clientMe = await clientMeRes.json();
+    check("client me returns email", clientMe.user.email === CLIENT_EMAIL);
+    check("client me has role 'client'", clientMe.user.role === "client");
+    check("client me uses inviting org", clientMe.user.organizationId === orgId);
 
-    // Members are blocked from POST /v1/invites.
-    const memberInviteAttempt = await fetch(`${API}/v1/invites`, {
+    // Clients are blocked from POST /v1/invites (admin-only).
+    const clientInviteAttempt = await fetch(`${API}/v1/invites`, {
       method: "POST",
-      headers: { "content-type": "application/json", cookie: `surv_sess=${memberCookie}` },
+      headers: { "content-type": "application/json", cookie: `surv_sess=${clientCookie}` },
       body: JSON.stringify({
         email: "another@example.com",
         organizationId: orgId,
-        role: "member",
+        role: "client",
       }),
     });
-    check("member POST /v1/invites 403", memberInviteAttempt.status === 403);
+    check("client POST /v1/invites 403", clientInviteAttempt.status === 403);
+
+    // …but clients still have operator privileges (pairing, cameras, connectors).
+    const clientConnectorsRes = await fetch(`${API}/v1/connectors`, {
+      headers: { cookie: `surv_sess=${clientCookie}` },
+    });
+    check("client GET /v1/connectors 200", clientConnectorsRes.status === 200);
+    const clientPairingRes = await fetch(`${API}/v1/pairings`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: `surv_sess=${clientCookie}` },
+      body: JSON.stringify({}),
+    });
+    check("client POST /v1/pairings 201", clientPairingRes.status === 201);
 
     // Admin lists invites — sees the consumed one.
     const listInvitesRes = await fetch(`${API}/v1/invites`, {
@@ -372,7 +391,7 @@ async function main() {
     const listInvites = await listInvitesRes.json();
     check(
       "admin lists invite",
-      listInvites.invites.length === 1 && listInvites.invites[0].email === MEMBER_EMAIL,
+      listInvites.invites.length === 1 && listInvites.invites[0].email === CLIENT_EMAIL,
     );
     check(
       "listed invite shows consumed",

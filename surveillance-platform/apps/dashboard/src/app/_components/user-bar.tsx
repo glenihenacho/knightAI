@@ -13,30 +13,40 @@ export function UserBar({ email }: { email: string }) {
     try {
       await api.logout();
     } finally {
-      // Whether logout succeeded or not, send the user to /login. Middleware
-      // will keep them there until they get a fresh cookie.
       router.replace("/login");
       router.refresh();
     }
   }
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 14 }}>
-      <span style={{ color: "var(--color-muted)" }}>{email}</span>
+    <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+      <span
+        style={{
+          fontFamily: "var(--font-mono), 'JetBrains Mono', monospace",
+          fontSize: 11,
+          letterSpacing: "0.1em",
+          color: "var(--ink-2)",
+        }}
+      >
+        {email}
+      </span>
       <button
         type="button"
         onClick={logout}
         disabled={pending}
         style={{
-          padding: "4px 10px",
-          fontSize: 13,
-          background: "white",
-          border: "1px solid var(--color-border)",
-          borderRadius: 4,
+          padding: "6px 12px",
+          background: "transparent",
+          border: "1px solid var(--rule-2)",
+          color: "var(--ink-2)",
+          fontFamily: "var(--font-mono), 'JetBrains Mono', monospace",
+          fontSize: 10,
+          letterSpacing: "0.14em",
+          textTransform: "uppercase",
           cursor: pending ? "default" : "pointer",
         }}
       >
-        {pending ? "Signing out..." : "Sign out"}
+        {pending ? "Signing out…" : "Sign out"}
       </button>
     </div>
   );

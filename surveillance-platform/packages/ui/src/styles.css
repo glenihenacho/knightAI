@@ -1,14 +1,54 @@
 :root {
-  --color-bg: #f8fafc;
-  --color-fg: #0f172a;
-  --color-muted: #64748b;
-  --color-border: #e2e8f0;
-  --color-accent: #2563eb;
+  --bg: #0a0a08;
+  --bg-2: #121210;
+  --ink: #f1ecdf;
+  --ink-2: #a8a08e;
+  --rule: #22221d;
+  --rule-2: #2e2e26;
+  --gold: #e9b864;
+  --gold-2: #c89238;
+  --gold-3: #fff0c8;
+  --red: #ff5a4d;
+  --green: #9ad07a;
+
+  /* Backward-compat aliases for inline styles still using --color-*. */
+  --color-bg: var(--bg);
+  --color-fg: var(--ink);
+  --color-muted: var(--ink-2);
+  --color-border: var(--rule);
+  --color-accent: var(--gold);
 }
 
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
 body {
   margin: 0;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  background: var(--color-bg);
-  color: var(--color-fg);
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans), "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-weight: 400;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--gold);
+  color: #0a0a08;
+}
+
+a {
+  color: inherit;
+}
+
+input,
+button,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
 }

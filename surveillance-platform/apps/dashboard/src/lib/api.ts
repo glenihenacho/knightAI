@@ -47,6 +47,12 @@ export class UnauthorizedError extends Error {
 
 export const api = {
   me: (opts: FetchOptions = {}) => call<MeResponse>("/v1/auth/me", { method: "GET" }, opts),
+  listOrganizations: (opts: FetchOptions = {}) =>
+    call<{ organizations: { id: string; name: string }[] }>(
+      "/v1/organizations",
+      { method: "GET" },
+      opts,
+    ),
   requestMagicLink: (email: string) =>
     call<void>(
       "/v1/auth/magic-link",

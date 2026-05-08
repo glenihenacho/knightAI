@@ -10,13 +10,17 @@ export function CameraPreview({ label, snapshotUrl, capturedAt }: CameraPreviewP
       <div
         style={{
           aspectRatio: "16 / 9",
-          background: "#0f172a",
-          borderRadius: 8,
+          background: "#0a0a08",
+          border: "1px solid var(--rule)",
           overflow: "hidden",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          color: "#94a3b8",
+          color: "var(--ink-2)",
+          fontFamily: "var(--font-mono), 'JetBrains Mono', monospace",
+          fontSize: 11,
+          letterSpacing: "0.14em",
+          textTransform: "uppercase",
         }}
       >
         {snapshotUrl ? (
@@ -29,9 +33,29 @@ export function CameraPreview({ label, snapshotUrl, capturedAt }: CameraPreviewP
           <span>No snapshot yet</span>
         )}
       </div>
-      <figcaption style={{ marginTop: 8, fontSize: 13, color: "#475569" }}>
-        <strong>{label}</strong>
-        {capturedAt ? ` · ${new Date(capturedAt).toLocaleString()}` : ""}
+      <figcaption
+        style={{
+          marginTop: 10,
+          fontSize: 13,
+          color: "var(--ink-2)",
+          display: "flex",
+          justifyContent: "space-between",
+          gap: 8,
+        }}
+      >
+        <strong style={{ color: "var(--ink)", fontWeight: 500 }}>{label}</strong>
+        {capturedAt && (
+          <span
+            style={{
+              fontFamily: "var(--font-mono), 'JetBrains Mono', monospace",
+              fontSize: 10,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+            }}
+          >
+            {new Date(capturedAt).toLocaleString()}
+          </span>
+        )}
       </figcaption>
     </figure>
   );

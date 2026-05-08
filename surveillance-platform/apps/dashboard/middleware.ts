@@ -8,6 +8,10 @@ const PUBLIC_PATHS = ["/login"];
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
+  // Marketing landing is public — exact match only so we don't whitelist
+  // every authed route by accident.
+  if (pathname === "/") return NextResponse.next();
+
   // Static assets and Next internals are excluded via the matcher below.
   if (PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
     return NextResponse.next();

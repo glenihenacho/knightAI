@@ -46,3 +46,12 @@ export async function listInvitesServer() {
     throw err;
   }
 }
+
+export async function listOrganizationsServer() {
+  try {
+    return await api.listOrganizations({ cookie: cookieHeader() });
+  } catch (err) {
+    if (err instanceof UnauthorizedError) redirect("/login");
+    throw err;
+  }
+}
