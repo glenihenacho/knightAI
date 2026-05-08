@@ -285,37 +285,35 @@ export default function MarketingLanding() {
                 03 / The upgrade, plainly
               </span>
               <h2>
-                What standard surveillance{" "}
+                Then, versus{" "}
                 <span className="gc-it gc-shine" data-shine="1">
-                  used to be.
+                  now.
                 </span>
-                <br />
-                What programmable intelligence becomes.
               </h2>
             </div>
             <span className="gc-num">Before / After</span>
           </div>
-          <div className="gc-ba gc-r" data-reveal="1">
-            <div className="gc-col gc-before">
-              <h4>Before · Standard contract</h4>
-              <ul>
-                <li><span /><span>Cameras recording into an NVR no one watches</span></li>
-                <li><span /><span>Paper logs and pin-pad checkpoints</span></li>
-                <li><span /><span>Incidents discovered the next morning</span></li>
-                <li><span /><span>Monthly invoice with no proof attached</span></li>
-                <li><span /><span>Client questions every renewal</span></li>
-              </ul>
-            </div>
-            <div className="gc-col gc-after">
-              <h4 className="gc-shine" data-shine="1">After · Programmable intelligence layer</h4>
-              <ul>
-                <li><span /><span>Site rules programmed by zone, shift, access condition, and risk level</span></li>
-                <li><span /><span>Activity interpreted as behavior, not raw motion</span></li>
-                <li><span /><span>Events routed through response workflows with acknowledgement and escalation</span></li>
-                <li><span /><span>Every action compiled into structured evidence packets</span></li>
-                <li><span /><span>Renewals supported by visible proof of performance</span></li>
-              </ul>
-            </div>
+        </div>
+        <div className="gc-ba gc-ba-wide gc-r" data-reveal="1">
+          <div className="gc-col gc-before">
+            <h4>Before · Standard contract</h4>
+            <ul>
+              <li><span /><span>Cameras recording into an NVR no one watches</span></li>
+              <li><span /><span>Paper logs and pin-pad checkpoints</span></li>
+              <li><span /><span>Incidents discovered the next morning</span></li>
+              <li><span /><span>Monthly invoice with no proof attached</span></li>
+              <li><span /><span>Client questions every renewal</span></li>
+            </ul>
+          </div>
+          <div className="gc-col gc-after">
+            <h4 className="gc-shine" data-shine="1">After · Programmable intelligence layer</h4>
+            <ul>
+              <li><span /><span>Site rules programmed by zone, shift, access condition, and risk level</span></li>
+              <li><span /><span>Activity interpreted as behavior, not raw motion</span></li>
+              <li><span /><span>Events routed through response workflows with acknowledgement and escalation</span></li>
+              <li><span /><span>Every action compiled into structured evidence packets</span></li>
+              <li><span /><span>Renewals supported by visible proof of performance</span></li>
+            </ul>
           </div>
         </div>
       </section>
