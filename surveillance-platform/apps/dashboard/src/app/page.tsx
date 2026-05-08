@@ -23,7 +23,7 @@ export default function MarketingLanding() {
             <a href="#economics">Economics</a>
             <a href="#product">Product</a>
             <a href="#integrations">Integrations</a>
-            <a href="#contact">Contact</a>
+            <Link href="/dashboard">Client</Link>
           </div>
           <a className="gc-btn gc-primary" href="#demo" data-pointer-track="1">
             Book a Private Demo <span className="gc-arrow">→</span>
@@ -298,21 +298,21 @@ export default function MarketingLanding() {
           <div className="gc-col gc-before">
             <h4>Before · Standard contract</h4>
             <ul>
-              <li><span /><span>Cameras recording into an NVR no one watches</span></li>
-              <li><span /><span>Paper logs and pin-pad checkpoints</span></li>
-              <li><span /><span>Incidents discovered the next morning</span></li>
-              <li><span /><span>Monthly invoice with no proof attached</span></li>
-              <li><span /><span>Client questions every renewal</span></li>
+              <li>Cameras recording into an NVR no one watches</li>
+              <li>Paper logs and pin-pad checkpoints</li>
+              <li>Incidents discovered the next morning</li>
+              <li>Monthly invoice with no proof attached</li>
+              <li>Client questions every renewal</li>
             </ul>
           </div>
           <div className="gc-col gc-after">
             <h4 className="gc-shine" data-shine="1">After · Programmable intelligence layer</h4>
             <ul>
-              <li><span /><span>Site rules programmed by zone, shift, access condition, and risk level</span></li>
-              <li><span /><span>Activity interpreted as behavior, not raw motion</span></li>
-              <li><span /><span>Events routed through response workflows with acknowledgement and escalation</span></li>
-              <li><span /><span>Every action compiled into structured evidence packets</span></li>
-              <li><span /><span>Renewals supported by visible proof of performance</span></li>
+              <li>Site rules programmed by zone, shift, access condition, and risk level</li>
+              <li>Activity interpreted as behavior, not raw motion</li>
+              <li>Events routed through response workflows with acknowledgement and escalation</li>
+              <li>Every action compiled into structured evidence packets</li>
+              <li>Renewals supported by visible proof of performance</li>
             </ul>
           </div>
         </div>
