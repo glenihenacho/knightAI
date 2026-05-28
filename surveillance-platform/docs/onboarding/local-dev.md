@@ -62,9 +62,23 @@ can reach.
 
 ## Running tests
 
+There are two tiers:
+
 ```bash
+# Fast unit tests — pure logic only, no infrastructure required.
+# Safe to run anywhere (RTSP URL parsing, token hashing/comparison, …).
 pnpm test
+
+# Full API end-to-end smoke test. Requires a running Postgres
+# (DATABASE_URL) — it WIPES that database, applies migrations, boots the API
+# against an in-process S3 stub, and exercises the pairing → validation →
+# HLS-preview flow plus auth and cross-org isolation.
+pnpm test:integration
 ```
+
+Run `pnpm test:integration` against a throwaway/local database only — it drops
+every table before running. The local Docker Postgres (above) is the intended
+target; it picks up `DATABASE_URL` the same way the API does.
 
 ## Resetting state
 

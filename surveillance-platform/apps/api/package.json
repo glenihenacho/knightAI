@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
     "migrate": "tsx src/db/migrate.ts",
+    "test": "node --test --import tsx src/db/*.test.ts",
     "test:integration": "tsx tests/smoke.ts",
     "typecheck": "tsc --noEmit",
     "lint": "echo skip"

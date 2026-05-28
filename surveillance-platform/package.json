@@ -10,6 +10,7 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
+    "test:integration": "turbo run test:integration",
     "clean": "turbo run clean && rm -rf node_modules"
   },
   "devDependencies": {

@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type {
   Camera,
   CameraState,
@@ -12,6 +12,12 @@ import type {
   UserRole,
 } from "@surveillance/shared";
 import { getPool, withTx } from "./client.js";
+import {
+  compareTokenHash,
+  generateConnectorToken,
+  generatePairingCode,
+  hashToken,
+} from "./tokens.js";
 
 export interface PairingRecord {
   id: string;
@@ -147,29 +153,6 @@ export interface Store {
   // expired, or unknown tokens.
   findSessionByToken(token: string): Promise<SessionPrincipal | null>;
   deleteSessionByToken(token: string): Promise<void>;
-}
-
-const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-
-function generatePairingCode(): string {
-  const pick = () => ALPHABET[randomBytes(1)[0]! % ALPHABET.length];
-  const block = () => Array.from({ length: 4 }, pick).join("");
-  return `${block()}-${block()}`;
-}
-
-function generateConnectorToken(): string {
-  return randomBytes(48).toString("hex");
-}
-
-function hashToken(plain: string): string {
-  return createHash("sha256").update(plain).digest("hex");
-}
-
-function compareTokenHash(plain: string, hash: string): boolean {
-  const a = Buffer.from(hashToken(plain), "hex");
-  const b = Buffer.from(hash, "hex");
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
 }
 
 interface ConnectorRow {
@@ -399,7 +382,18 @@ export function createStore(databaseUrl: string): Store {
       if (!row) return null;
       if (row.status === "revoked") return null;
       if (!compareTokenHash(token, row.token_hash)) return null;
-      await pool.query("UPDATE connectors SET last_seen_at = now() WHERE id = $1", [connectorId]);
+      // Connectors poll this path every few seconds, so refresh last_seen_at at
+      // most once per throttle window. last_seen_at is purely a "last contact"
+      // indicator (nothing keys offline detection off its exact value), and the
+      // conditional WHERE turns most polls into a no-op update — no row matched,
+      // no row version churn, no WAL — instead of a write on every request.
+      await pool.query(
+        `UPDATE connectors
+            SET last_seen_at = now()
+          WHERE id = $1
+            AND (last_seen_at IS NULL OR last_seen_at < now() - interval '15 seconds')`,
+        [connectorId],
+      );
       return rowToConnector(row);
     },
 
@@ -803,5 +797,6 @@ export function createStore(databaseUrl: string): Store {
 }
 
 // Re-exported for callers that need to compare a presented token to a stored
-// hash without going through the store (e.g. tests).
-export { hashToken, compareTokenHash };
+// hash without going through the store (e.g. tests). The implementations live
+// in ./tokens.ts so they can be tested without the Postgres pool.
+export { hashToken, compareTokenHash } from "./tokens.js";
