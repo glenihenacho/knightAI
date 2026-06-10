@@ -60,7 +60,7 @@ const EnvSchema = z.object({
     .string()
     .default("false")
     .transform((v) => v === "true" || v === "1"),
-  // Optional Domain attribute for the session cookie (e.g. ".knightai.com" so
+  // Optional Domain attribute for the session cookie (e.g. ".goldcrusade.com" so
   // both api.* and dashboard.* see it). Leave unset for localhost dev.
   SESSION_COOKIE_DOMAIN: z.string().optional(),
 });

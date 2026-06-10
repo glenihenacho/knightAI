@@ -23,7 +23,7 @@ brew install flyctl                        # or curl https://fly.io/install.sh |
 npm i -g vercel                            # if you prefer CLI; the dashboard works too
 ```
 
-You'll also need a domain (e.g. `knightai.com`). The dashboard and API need to
+You'll also need a domain (e.g. `goldcrusade.com`). The dashboard and API need to
 share an apex domain so session cookies travel cross-subdomain. Without that,
 auth requires SameSite=None+Secure cross-site cookies, which some browsers
 restrict.
@@ -74,16 +74,16 @@ Set secrets (everything not in `fly.toml`'s `[env]` block):
 ```bash
 fly secrets set \
   DATABASE_URL="postgres://...neon.tech/...?sslmode=require" \
-  PUBLIC_BASE_URL="https://api.knightai.com" \
-  DASHBOARD_BASE_URL="https://dashboard.knightai.com" \
-  SESSION_COOKIE_DOMAIN=".knightai.com" \
+  PUBLIC_BASE_URL="https://api.goldcrusade.com" \
+  DASHBOARD_BASE_URL="https://dashboard.goldcrusade.com" \
+  SESSION_COOKIE_DOMAIN=".goldcrusade.com" \
   S3_ENDPOINT="https://<account-id>.r2.cloudflarestorage.com" \
   S3_REGION="auto" \
   S3_BUCKET="surveillance-prod" \
   S3_ACCESS_KEY_ID="..." \
   S3_SECRET_ACCESS_KEY="..." \
   RESEND_API_KEY="re_..." \
-  RESEND_FROM_EMAIL="auth@knightai.com" \
+  RESEND_FROM_EMAIL="auth@goldcrusade.com" \
   --config infra/deploy/fly.toml
 ```
 
@@ -99,7 +99,7 @@ Health check is `GET /healthz` every 15s.
 Custom domain:
 
 ```bash
-fly certs add api.knightai.com --config infra/deploy/fly.toml
+fly certs add api.goldcrusade.com --config infra/deploy/fly.toml
 # then in your DNS: CNAME api -> <app>.fly.dev (or AAAA per the cert output)
 ```
 
@@ -113,8 +113,8 @@ fly certs add api.knightai.com --config infra/deploy/fly.toml
    workspace root automatically; `vercel.json` overrides install/build to be
    explicit about that.
 3. Environment variables:
-   - `NEXT_PUBLIC_API_BASE_URL` = `https://api.knightai.com`
-4. Deploy. Then add the custom domain `dashboard.knightai.com` in Project
+   - `NEXT_PUBLIC_API_BASE_URL` = `https://api.goldcrusade.com`
+4. Deploy. Then add the custom domain `dashboard.goldcrusade.com` in Project
    Settings → Domains.
 
 ---
@@ -124,11 +124,11 @@ fly certs add api.knightai.com --config infra/deploy/fly.toml
 A typical layout:
 
 ```
-api.knightai.com         CNAME  <fly-app>.fly.dev
-dashboard.knightai.com   CNAME  cname.vercel-dns.com
+api.goldcrusade.com         CNAME  <fly-app>.fly.dev
+dashboard.goldcrusade.com   CNAME  cname.vercel-dns.com
 ```
 
-Both share the apex `knightai.com`, so `SESSION_COOKIE_DOMAIN=.knightai.com`
+Both share the apex `goldcrusade.com`, so `SESSION_COOKIE_DOMAIN=.goldcrusade.com`
 makes the session cookie visible to both sides.
 
 ---
@@ -138,7 +138,7 @@ makes the session cookie visible to both sides.
 The connector binary (built once per platform via
 `pnpm --filter @surveillance/connector-tauri tauri:build`) prompts the
 operator for an API URL on first launch — they enter
-`https://api.knightai.com` and a pairing code generated in the dashboard.
+`https://api.goldcrusade.com` and a pairing code generated in the dashboard.
 
 Connector → API is bearer-token over HTTPS; no inbound port on the customer
 network is needed.
@@ -150,13 +150,13 @@ network is needed.
 After both services are up:
 
 ```bash
-curl https://api.knightai.com/healthz
+curl https://api.goldcrusade.com/healthz
 # {"ok":true,...}
 ```
 
 Then in a browser:
 
-1. Hit `https://dashboard.knightai.com/login`, request a magic link.
+1. Hit `https://dashboard.goldcrusade.com/login`, request a magic link.
 2. The Resend email lands in your inbox; click it.
 3. Generate a pairing code, paste into a connector instance.
 4. Register a camera with a reachable RTSP URL.
