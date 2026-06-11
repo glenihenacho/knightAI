@@ -16,7 +16,9 @@ type AppState = PairedState | UnpairedState | { status: "loading" };
 export function App() {
   const [state, setState] = useState<AppState>({ status: "loading" });
   const [code, setCode] = useState("");
-  const [apiUrl, setApiUrl] = useState("http://localhost:4000");
+  const [apiUrl, setApiUrl] = useState(
+    import.meta.env.DEV ? "http://localhost:4000" : "https://api.goldcrusade.com"
+  );
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
