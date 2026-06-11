@@ -47,6 +47,9 @@ const EnvSchema = z.object({
   // Where the dashboard is served from. Used as the redirect target after a
   // magic-link verify and as the allowed CORS origin for credentialed requests.
   DASHBOARD_BASE_URL: z.string().url().default("http://localhost:3000"),
+  // Extra origins allowed to make credentialed CORS requests, comma-separated
+  // (e.g. the www/apex marketing site, which serves the same /login page).
+  CORS_ALLOWED_ORIGINS: z.string().optional(),
   // Resend transactional email. If RESEND_API_KEY is unset the magic link is
   // logged to stdout instead of sent — convenient for local dev and CI.
   RESEND_API_KEY: z.string().optional(),

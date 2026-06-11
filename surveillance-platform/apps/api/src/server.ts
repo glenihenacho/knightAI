@@ -22,10 +22,19 @@ async function main() {
   const env = loadEnv();
   const app = Fastify({ logger: { level: env.NODE_ENV === "production" ? "info" : "debug" } });
 
-  // The dashboard talks to the API cross-origin in dev (localhost:3000 -> :4000).
-  // Echo the request origin so cookies travel with credentialed fetches.
+  // The dashboard talks to the API cross-origin (localhost:3000 -> :4000 in
+  // dev, dashboard.* -> api.* in prod). Origin headers never carry a path or
+  // trailing slash, so reduce configured URLs to bare origins before matching —
+  // otherwise a "https://x.com/" env value silently fails every CORS check.
+  const allowedOrigins = [
+    env.DASHBOARD_BASE_URL,
+    ...(env.CORS_ALLOWED_ORIGINS?.split(",") ?? []),
+  ]
+    .map((u) => u.trim())
+    .filter(Boolean)
+    .map((u) => new URL(u).origin);
   await app.register(cors, {
-    origin: [env.DASHBOARD_BASE_URL],
+    origin: allowedOrigins,
     credentials: true,
   });
   await app.register(cookie);
