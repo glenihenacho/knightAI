@@ -14,11 +14,17 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            label: macos-arm64
+            label: macos-universal
+            build_script: tauri:build:mac-universal
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
           - os: windows-latest
             label: windows-x64
+            build_script: tauri:build
+            rust_targets: ""
           - os: ubuntu-22.04
             label: linux-x64
+            build_script: tauri:build
+            rust_targets: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +47,8 @@ jobs:
           cache-dependency-path: surveillance-platform/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -48,13 +56,14 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # pretauri:build fetches the platform FFmpeg sidecar into src-tauri/binaries/
-      - run: pnpm --filter @surveillance/connector-tauri tauri:build
+      # the pre-script fetches the platform FFmpeg sidecar into src-tauri/binaries/
+      - run: pnpm --filter @surveillance/connector-tauri ${{ matrix.build_script }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: connector-${{ matrix.label }}
           path: |
+            surveillance-platform/apps/connector-tauri/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
             surveillance-platform/apps/connector-tauri/src-tauri/target/release/bundle/dmg/*.dmg
             surveillance-platform/apps/connector-tauri/src-tauri/target/release/bundle/msi/*.msi
             surveillance-platform/apps/connector-tauri/src-tauri/target/release/bundle/nsis/*.exe

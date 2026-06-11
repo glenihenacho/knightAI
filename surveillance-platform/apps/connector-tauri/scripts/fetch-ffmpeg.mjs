@@ -6,7 +6,10 @@
 //
 // Sources:
 //   - Linux + Windows: BtbN/FFmpeg-Builds (GPL static builds)
-//   - macOS:           evermeet.cx (universal2 release zip)
+//   - macOS x86_64:    evermeet.cx (x86_64-only, despite older claims of universal2)
+//   - macOS arm64:     ffmpeg.martin-riedl.de (native arm64 static build)
+//   - macOS universal: both of the above, combined with `lipo -create`
+//                      (requires running on macOS; used for universal app builds)
 //
 // Pin a specific BtbN tag with FFMPEG_BUILD_TAG=autobuild-YYYY-MM-DD-HH-MM.
 // Default is `latest` (rolling).
@@ -66,63 +69,85 @@ const SOURCES = {
     suffix: '',
   },
   'aarch64-apple-darwin': {
-    url: 'https://evermeet.cx/ffmpeg/getrelease/zip',
+    url: 'https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip',
     archiveBin: 'ffmpeg',
     suffix: '',
   },
 };
 
-const config = SOURCES[target];
-if (!config) {
-  console.error(`Unknown target: ${target}`);
-  console.error(`Known targets: ${Object.keys(SOURCES).join(', ')}`);
-  process.exit(1);
+async function fetchOne(triple) {
+  const config = SOURCES[triple];
+  if (!config) {
+    console.error(`Unknown target: ${triple}`);
+    console.error(`Known targets: ${Object.keys(SOURCES).join(', ')}, universal-apple-darwin`);
+    process.exit(1);
+  }
+
+  const dest = resolve(BIN_DIR, `ffmpeg-${triple}${config.suffix}`);
+
+  if (existsSync(dest) && !FORCE) {
+    console.log(`✓ ${basename(dest)} already present (use --force to redownload)`);
+    return dest;
+  }
+
+  await mkdir(BIN_DIR, { recursive: true });
+  await rm(TMP_DIR, { recursive: true, force: true });
+  await mkdir(TMP_DIR, { recursive: true });
+
+  const archiveName = config.url.split('/').pop().split('?')[0] || 'ffmpeg.archive';
+  const archivePath = resolve(TMP_DIR, archiveName);
+
+  console.log(`Fetching FFmpeg for ${triple}`);
+  console.log(`  ${config.url}`);
+
+  const res = await fetch(config.url, { redirect: 'follow' });
+  if (!res.ok) {
+    console.error(`Download failed: ${res.status} ${res.statusText}`);
+    process.exit(1);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  await writeFile(archivePath, buf);
+
+  const sizeMb = (buf.length / 1024 / 1024).toFixed(1);
+  console.log(`  downloaded ${sizeMb} MiB, extracting…`);
+
+  // `tar` on Linux/macOS/Win10+ handles both .tar.xz and .zip via libarchive.
+  execFileSync('tar', ['-xf', archivePath, '-C', TMP_DIR], { stdio: 'inherit' });
+
+  const extracted = resolve(TMP_DIR, config.archiveBin);
+  try {
+    await stat(extracted);
+  } catch {
+    console.error(`Expected ${config.archiveBin} inside archive, not found.`);
+    process.exit(1);
+  }
+
+  await cp(extracted, dest);
+  if (process.platform !== 'win32' && config.suffix !== '.exe') {
+    await chmod(dest, 0o755);
+  }
+
+  await rm(TMP_DIR, { recursive: true, force: true });
+
+  console.log(`✓ Wrote ${dest}`);
+  return dest;
 }
 
-const dest = resolve(BIN_DIR, `ffmpeg-${target}${config.suffix}`);
-
-if (existsSync(dest) && !FORCE) {
-  console.log(`✓ ${basename(dest)} already present (use --force to redownload)`);
-  process.exit(0);
-}
-
-await mkdir(BIN_DIR, { recursive: true });
-await rm(TMP_DIR, { recursive: true, force: true });
-await mkdir(TMP_DIR, { recursive: true });
-
-const archiveName = config.url.split('/').pop().split('?')[0] || 'ffmpeg.archive';
-const archivePath = resolve(TMP_DIR, archiveName);
-
-console.log(`Fetching FFmpeg for ${target}`);
-console.log(`  ${config.url}`);
-
-const res = await fetch(config.url, { redirect: 'follow' });
-if (!res.ok) {
-  console.error(`Download failed: ${res.status} ${res.statusText}`);
-  process.exit(1);
-}
-const buf = Buffer.from(await res.arrayBuffer());
-await writeFile(archivePath, buf);
-
-const sizeMb = (buf.length / 1024 / 1024).toFixed(1);
-console.log(`  downloaded ${sizeMb} MiB, extracting…`);
-
-// `tar` on Linux/macOS/Win10+ handles both .tar.xz and .zip via libarchive.
-execFileSync('tar', ['-xf', archivePath, '-C', TMP_DIR], { stdio: 'inherit' });
-
-const extracted = resolve(TMP_DIR, config.archiveBin);
-try {
-  await stat(extracted);
-} catch {
-  console.error(`Expected ${config.archiveBin} inside archive, not found.`);
-  process.exit(1);
-}
-
-await cp(extracted, dest);
-if (process.platform !== 'win32' && config.suffix !== '.exe') {
+if (target === 'universal-apple-darwin') {
+  if (process.platform !== 'darwin') {
+    console.error('universal-apple-darwin requires macOS (needs `lipo`).');
+    process.exit(1);
+  }
+  const dest = resolve(BIN_DIR, 'ffmpeg-universal-apple-darwin');
+  if (existsSync(dest) && !FORCE) {
+    console.log(`✓ ${basename(dest)} already present (use --force to redownload)`);
+    process.exit(0);
+  }
+  const x64 = await fetchOne('x86_64-apple-darwin');
+  const arm = await fetchOne('aarch64-apple-darwin');
+  execFileSync('lipo', ['-create', '-output', dest, x64, arm], { stdio: 'inherit' });
   await chmod(dest, 0o755);
+  console.log(`✓ Wrote ${dest} (universal: x86_64 + arm64)`);
+} else {
+  await fetchOne(target);
 }
-
-await rm(TMP_DIR, { recursive: true, force: true });
-
-console.log(`✓ Wrote ${dest}`);
