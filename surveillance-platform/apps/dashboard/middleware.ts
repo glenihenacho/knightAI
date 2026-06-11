@@ -7,10 +7,19 @@ const PUBLIC_PATHS = ["/login"];
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
+  const host = req.headers.get("host") ?? "";
+  const isAppHost = host.startsWith("dashboard.");
 
   // Marketing landing is public — exact match only so we don't whitelist
-  // every authed route by accident.
-  if (pathname === "/") return NextResponse.next();
+  // every authed route by accident. On the dashboard subdomain there is no
+  // marketing page: root goes straight to the app (or login).
+  if (pathname === "/") {
+    if (!isAppHost) return NextResponse.next();
+    const url = req.nextUrl.clone();
+    url.pathname = req.cookies.has(SESSION_COOKIE) ? "/dashboard" : "/login";
+    url.search = "";
+    return NextResponse.redirect(url);
+  }
 
   // Static assets and Next internals are excluded via the matcher below.
   if (PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
