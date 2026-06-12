@@ -2,13 +2,14 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Eyebrow } from "@surveillance/ui";
-import { listOrganizationsServer, requireSession } from "@/lib/server-api";
+import { getSiteServer } from "@/lib/server-api";
 
 const TABS = [
-  { href: "cameras", label: "Cameras", live: true },
-  { href: "connectors", label: "Connectors", live: true },
-  { href: "zones", label: "Zones", live: false },
-  { href: "schedules", label: "Schedules", live: false },
+  { href: "cameras", label: "Cameras" },
+  { href: "connectors", label: "Connectors" },
+  { href: "zones", label: "Zones" },
+  { href: "schedules", label: "Schedules" },
+  { href: "rules", label: "Rules" },
 ] as const;
 
 export default async function SiteLayout({
@@ -18,12 +19,8 @@ export default async function SiteLayout({
   children: ReactNode;
   params: { id: string };
 }) {
-  const me = await requireSession();
-  if (params.id !== me.user.organizationId) notFound();
-
-  const { organizations } = await listOrganizationsServer();
-  const org = organizations.find((o) => o.id === params.id);
-  if (!org) notFound();
+  const site = await getSiteServer(params.id);
+  if (!site) notFound();
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
@@ -50,9 +47,9 @@ export default async function SiteLayout({
             margin: "12px 0 4px",
           }}
         >
-          {org.name}
+          {site.label}
         </h1>
-        <Eyebrow>Site detail</Eyebrow>
+        <Eyebrow>Site detail · {site.timezone}</Eyebrow>
       </div>
 
       <nav
@@ -63,21 +60,8 @@ export default async function SiteLayout({
         }}
       >
         {TABS.map((t) => (
-          <SiteTab key={t.href} href={`/sites/${params.id}/${t.href}`} live={t.live}>
+          <SiteTab key={t.href} href={`/sites/${params.id}/${t.href}`}>
             {t.label}
-            {!t.live && (
-              <span
-                style={{
-                  marginLeft: 8,
-                  fontSize: 9,
-                  color: "var(--ink-2)",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.16em",
-                }}
-              >
-                soon
-              </span>
-            )}
           </SiteTab>
         ))}
         <div style={{ flex: 1 }} />
@@ -107,28 +91,19 @@ export default async function SiteLayout({
   );
 }
 
-function SiteTab({
-  href,
-  live,
-  children,
-}: {
-  href: string;
-  live: boolean;
-  children: ReactNode;
-}) {
+function SiteTab({ href, children }: { href: string; children: ReactNode }) {
   return (
     <Link
-      href={live ? href : "#"}
+      href={href}
       style={{
         padding: "12px 18px",
         textDecoration: "none",
-        color: live ? "var(--ink)" : "var(--ink-2)",
+        color: "var(--ink)",
         fontFamily: "var(--font-mono), 'JetBrains Mono', monospace",
         fontSize: 12,
         letterSpacing: "0.12em",
         textTransform: "uppercase",
-        cursor: live ? "pointer" : "not-allowed",
-        opacity: live ? 1 : 0.6,
+        cursor: "pointer",
         borderBottom: "1px solid transparent",
         marginBottom: -1,
       }}

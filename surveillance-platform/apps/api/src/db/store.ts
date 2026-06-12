@@ -1,21 +1,30 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type {
+  Action,
   Camera,
   CameraState,
   Command,
   Connector,
   ConnectorStatus,
   Invite,
+  PolygonPoint,
   Preview,
   PreviewStatus,
+  Rule,
+  Schedule,
+  ScheduleWindow,
+  Site,
+  Trigger,
   User,
   UserRole,
+  Zone,
 } from "@surveillance/shared";
 import { getPool, withTx } from "./client.js";
 
 export interface PairingRecord {
   id: string;
   organizationId: string;
+  siteId: string;
   code: string;
   expiresAt: string;
   redeemedConnectorId: string | null;
@@ -66,12 +75,102 @@ export interface SessionPrincipal {
   sessionId: string;
 }
 
+export interface CreateSiteInput {
+  label: string;
+  timezone?: string;
+}
+
+export interface UpdateSiteInput {
+  label?: string;
+  timezone?: string;
+}
+
+export type DeleteSiteResult = "deleted" | "not_found" | "has_connectors";
+
+export interface CreateZoneInput {
+  label: string;
+  polygon: PolygonPoint[];
+}
+
+export interface UpdateZoneInput {
+  label?: string;
+  polygon?: PolygonPoint[];
+}
+
+export interface CreateScheduleInput {
+  label: string;
+  windows: ScheduleWindow[];
+}
+
+export interface UpdateScheduleInput {
+  label?: string;
+  windows?: ScheduleWindow[];
+}
+
+export interface CreateRuleInput {
+  label: string;
+  zoneId: string;
+  scheduleId: string | null;
+  trigger: Trigger;
+  action: Action;
+  enabled?: boolean;
+}
+
+export interface UpdateRuleInput {
+  label?: string;
+  zoneId?: string;
+  scheduleId?: string | null;
+  trigger?: Trigger;
+  action?: Action;
+  enabled?: boolean;
+}
+
 export interface Store {
   createOrganization(name: string): Promise<{ id: string; name: string }>;
   getOrganization(id: string): Promise<{ id: string; name: string } | null>;
   listOrganizations(): Promise<{ id: string; name: string }[]>;
 
-  createPairing(organizationId: string, ttlSeconds?: number): Promise<PairingRecord>;
+  // Sites — every org always has at least one (createOrganization seeds a
+  // "Default site"; deleteSite refuses while connectors are attached).
+  listSitesForOrg(organizationId: string): Promise<Site[]>;
+  createSite(organizationId: string, input: CreateSiteInput): Promise<Site>;
+  getSiteForOrg(siteId: string, organizationId: string): Promise<Site | null>;
+  // Oldest site in the org — the default target for pairings that don't name one.
+  getDefaultSiteForOrg(organizationId: string): Promise<Site | null>;
+  updateSite(siteId: string, organizationId: string, input: UpdateSiteInput): Promise<Site | null>;
+  deleteSite(siteId: string, organizationId: string): Promise<DeleteSiteResult>;
+
+  // Zones — org scoping flows through camera -> connector -> organization.
+  // Callers must org-check the camera before list/create.
+  listZonesForCamera(cameraId: string): Promise<Zone[]>;
+  createZone(cameraId: string, input: CreateZoneInput): Promise<Zone>;
+  getZoneForOrg(zoneId: string, organizationId: string): Promise<Zone | null>;
+  // Site the zone's camera belongs to (via its connector), org-checked.
+  // Used by rule creation to reject zones from a different site.
+  getZoneSiteId(zoneId: string, organizationId: string): Promise<string | null>;
+  updateZone(zoneId: string, organizationId: string, input: UpdateZoneInput): Promise<Zone | null>;
+  deleteZone(zoneId: string, organizationId: string): Promise<boolean>;
+
+  // Schedules — site-scoped; callers org-check the site before list/create.
+  listSchedulesForSite(siteId: string): Promise<Schedule[]>;
+  createSchedule(siteId: string, input: CreateScheduleInput): Promise<Schedule>;
+  getScheduleForOrg(scheduleId: string, organizationId: string): Promise<Schedule | null>;
+  updateSchedule(
+    scheduleId: string,
+    organizationId: string,
+    input: UpdateScheduleInput,
+  ): Promise<Schedule | null>;
+  deleteSchedule(scheduleId: string, organizationId: string): Promise<boolean>;
+
+  // Rules — site-scoped; referential validation (zone/schedule belong to the
+  // rule's site) happens in the route layer.
+  listRulesForSite(siteId: string): Promise<Rule[]>;
+  createRule(siteId: string, input: CreateRuleInput): Promise<Rule>;
+  getRuleForOrg(ruleId: string, organizationId: string): Promise<Rule | null>;
+  updateRule(ruleId: string, organizationId: string, input: UpdateRuleInput): Promise<Rule | null>;
+  deleteRule(ruleId: string, organizationId: string): Promise<boolean>;
+
+  createPairing(organizationId: string, siteId: string, ttlSeconds?: number): Promise<PairingRecord>;
   redeemPairing(code: string, info: RedeemInfo): Promise<RedeemedConnector | null>;
 
   authConnector(connectorId: string, token: string): Promise<Connector | null>;
@@ -175,6 +274,7 @@ function compareTokenHash(plain: string, hash: string): boolean {
 interface ConnectorRow {
   id: string;
   organization_id: string;
+  site_id: string;
   label: string;
   hostname: string | null;
   platform: "macos" | "windows" | "linux" | null;
@@ -188,6 +288,7 @@ function rowToConnector(row: ConnectorRow): Connector {
   return {
     id: row.id,
     organizationId: row.organization_id,
+    siteId: row.site_id,
     label: row.label,
     hostname: row.hostname,
     platform: row.platform,
@@ -293,6 +394,82 @@ function normalizeEmail(raw: string): string {
   return raw.trim().toLowerCase();
 }
 
+interface SiteRow {
+  id: string;
+  organization_id: string;
+  label: string;
+  timezone: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+function rowToSite(row: SiteRow): Site {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    label: row.label,
+    timezone: row.timezone,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+interface ZoneRow {
+  id: string;
+  camera_id: string;
+  label: string;
+  polygon: PolygonPoint[];
+}
+
+function rowToZone(row: ZoneRow): Zone {
+  return {
+    id: row.id,
+    cameraId: row.camera_id,
+    label: row.label,
+    polygon: row.polygon,
+  };
+}
+
+interface ScheduleRow {
+  id: string;
+  site_id: string;
+  label: string;
+  windows: ScheduleWindow[];
+}
+
+function rowToSchedule(row: ScheduleRow): Schedule {
+  return {
+    id: row.id,
+    siteId: row.site_id,
+    label: row.label,
+    windows: row.windows,
+  };
+}
+
+interface RuleRow {
+  id: string;
+  site_id: string;
+  label: string;
+  enabled: boolean;
+  zone_id: string;
+  schedule_id: string | null;
+  trigger: Trigger;
+  action: Action;
+}
+
+function rowToRule(row: RuleRow): Rule {
+  return {
+    id: row.id,
+    siteId: row.site_id,
+    label: row.label,
+    enabled: row.enabled,
+    zoneId: row.zone_id,
+    scheduleId: row.schedule_id,
+    trigger: row.trigger,
+    action: row.action,
+  };
+}
+
 interface CommandRow {
   id: string;
   connector_id: string;
@@ -317,7 +494,16 @@ export function createStore(databaseUrl: string): Store {
   return {
     async createOrganization(name) {
       const id = randomUUID();
-      await pool.query("INSERT INTO organizations (id, name) VALUES ($1, $2)", [id, name]);
+      // Every org gets a default site at birth — the migration backfill only
+      // covers orgs that existed when 0006 ran, and pairing/redeem assume an
+      // org always has at least one site.
+      await withTx(pool, async (client) => {
+        await client.query("INSERT INTO organizations (id, name) VALUES ($1, $2)", [id, name]);
+        await client.query(
+          "INSERT INTO sites (organization_id, label) VALUES ($1, 'Default site')",
+          [id],
+        );
+      });
       return { id, name };
     },
 
@@ -336,18 +522,333 @@ export function createStore(databaseUrl: string): Store {
       return rows;
     },
 
-    async createPairing(organizationId, ttlSeconds = 600) {
+    async listSitesForOrg(organizationId) {
+      const { rows } = await pool.query<SiteRow>(
+        `SELECT id, organization_id, label, timezone, created_at, updated_at
+           FROM sites
+          WHERE organization_id = $1
+          ORDER BY created_at ASC`,
+        [organizationId],
+      );
+      return rows.map(rowToSite);
+    },
+
+    async createSite(organizationId, input) {
+      const { rows } = await pool.query<SiteRow>(
+        `INSERT INTO sites (organization_id, label, timezone)
+         VALUES ($1, $2, COALESCE($3, 'UTC'))
+         RETURNING id, organization_id, label, timezone, created_at, updated_at`,
+        [organizationId, input.label, input.timezone ?? null],
+      );
+      return rowToSite(rows[0]!);
+    },
+
+    async getSiteForOrg(siteId, organizationId) {
+      const { rows } = await pool.query<SiteRow>(
+        `SELECT id, organization_id, label, timezone, created_at, updated_at
+           FROM sites
+          WHERE id = $1 AND organization_id = $2`,
+        [siteId, organizationId],
+      );
+      return rows[0] ? rowToSite(rows[0]) : null;
+    },
+
+    async getDefaultSiteForOrg(organizationId) {
+      const { rows } = await pool.query<SiteRow>(
+        `SELECT id, organization_id, label, timezone, created_at, updated_at
+           FROM sites
+          WHERE organization_id = $1
+          ORDER BY created_at ASC
+          LIMIT 1`,
+        [organizationId],
+      );
+      return rows[0] ? rowToSite(rows[0]) : null;
+    },
+
+    async updateSite(siteId, organizationId, input) {
+      const { rows } = await pool.query<SiteRow>(
+        `UPDATE sites
+            SET label = COALESCE($3, label),
+                timezone = COALESCE($4, timezone),
+                updated_at = now()
+          WHERE id = $1 AND organization_id = $2
+          RETURNING id, organization_id, label, timezone, created_at, updated_at`,
+        [siteId, organizationId, input.label ?? null, input.timezone ?? null],
+      );
+      return rows[0] ? rowToSite(rows[0]) : null;
+    },
+
+    async deleteSite(siteId, organizationId) {
+      return withTx(pool, async (client) => {
+        const site = await client.query(
+          "SELECT id FROM sites WHERE id = $1 AND organization_id = $2 FOR UPDATE",
+          [siteId, organizationId],
+        );
+        if (!site.rows[0]) return "not_found" as const;
+        const attached = await client.query(
+          "SELECT 1 FROM connectors WHERE site_id = $1 LIMIT 1",
+          [siteId],
+        );
+        if (attached.rows[0]) return "has_connectors" as const;
+        await client.query("DELETE FROM sites WHERE id = $1", [siteId]);
+        return "deleted" as const;
+      });
+    },
+
+    async listZonesForCamera(cameraId) {
+      const { rows } = await pool.query<ZoneRow>(
+        `SELECT id, camera_id, label, polygon
+           FROM zones
+          WHERE camera_id = $1
+          ORDER BY created_at ASC`,
+        [cameraId],
+      );
+      return rows.map(rowToZone);
+    },
+
+    async createZone(cameraId, input) {
+      // node-pg renders JS arrays as Postgres array literals, not JSON —
+      // stringify explicitly for jsonb columns.
+      const { rows } = await pool.query<ZoneRow>(
+        `INSERT INTO zones (camera_id, label, polygon)
+         VALUES ($1, $2, $3::jsonb)
+         RETURNING id, camera_id, label, polygon`,
+        [cameraId, input.label, JSON.stringify(input.polygon)],
+      );
+      return rowToZone(rows[0]!);
+    },
+
+    async getZoneForOrg(zoneId, organizationId) {
+      const { rows } = await pool.query<ZoneRow>(
+        `SELECT z.id, z.camera_id, z.label, z.polygon
+           FROM zones z
+           JOIN cameras c ON c.id = z.camera_id
+           JOIN connectors n ON n.id = c.connector_id
+          WHERE z.id = $1 AND n.organization_id = $2`,
+        [zoneId, organizationId],
+      );
+      return rows[0] ? rowToZone(rows[0]) : null;
+    },
+
+    async getZoneSiteId(zoneId, organizationId) {
+      const { rows } = await pool.query<{ site_id: string }>(
+        `SELECT n.site_id
+           FROM zones z
+           JOIN cameras c ON c.id = z.camera_id
+           JOIN connectors n ON n.id = c.connector_id
+          WHERE z.id = $1 AND n.organization_id = $2`,
+        [zoneId, organizationId],
+      );
+      return rows[0]?.site_id ?? null;
+    },
+
+    async updateZone(zoneId, organizationId, input) {
+      const { rows } = await pool.query<ZoneRow>(
+        `UPDATE zones z
+            SET label = COALESCE($3, z.label),
+                polygon = COALESCE($4::jsonb, z.polygon),
+                updated_at = now()
+           FROM cameras c
+           JOIN connectors n ON n.id = c.connector_id
+          WHERE z.id = $1
+            AND c.id = z.camera_id
+            AND n.organization_id = $2
+          RETURNING z.id, z.camera_id, z.label, z.polygon`,
+        [
+          zoneId,
+          organizationId,
+          input.label ?? null,
+          input.polygon ? JSON.stringify(input.polygon) : null,
+        ],
+      );
+      return rows[0] ? rowToZone(rows[0]) : null;
+    },
+
+    async deleteZone(zoneId, organizationId) {
+      const { rowCount } = await pool.query(
+        `DELETE FROM zones z
+          USING cameras c, connectors n
+          WHERE z.id = $1
+            AND c.id = z.camera_id
+            AND n.id = c.connector_id
+            AND n.organization_id = $2`,
+        [zoneId, organizationId],
+      );
+      return (rowCount ?? 0) > 0;
+    },
+
+    async listSchedulesForSite(siteId) {
+      const { rows } = await pool.query<ScheduleRow>(
+        `SELECT id, site_id, label, windows
+           FROM schedules
+          WHERE site_id = $1
+          ORDER BY created_at ASC`,
+        [siteId],
+      );
+      return rows.map(rowToSchedule);
+    },
+
+    async createSchedule(siteId, input) {
+      const { rows } = await pool.query<ScheduleRow>(
+        `INSERT INTO schedules (site_id, label, windows)
+         VALUES ($1, $2, $3::jsonb)
+         RETURNING id, site_id, label, windows`,
+        [siteId, input.label, JSON.stringify(input.windows)],
+      );
+      return rowToSchedule(rows[0]!);
+    },
+
+    async getScheduleForOrg(scheduleId, organizationId) {
+      const { rows } = await pool.query<ScheduleRow>(
+        `SELECT sc.id, sc.site_id, sc.label, sc.windows
+           FROM schedules sc
+           JOIN sites s ON s.id = sc.site_id
+          WHERE sc.id = $1 AND s.organization_id = $2`,
+        [scheduleId, organizationId],
+      );
+      return rows[0] ? rowToSchedule(rows[0]) : null;
+    },
+
+    async updateSchedule(scheduleId, organizationId, input) {
+      const { rows } = await pool.query<ScheduleRow>(
+        `UPDATE schedules sc
+            SET label = COALESCE($3, sc.label),
+                windows = COALESCE($4::jsonb, sc.windows),
+                updated_at = now()
+           FROM sites s
+          WHERE sc.id = $1
+            AND s.id = sc.site_id
+            AND s.organization_id = $2
+          RETURNING sc.id, sc.site_id, sc.label, sc.windows`,
+        [
+          scheduleId,
+          organizationId,
+          input.label ?? null,
+          input.windows ? JSON.stringify(input.windows) : null,
+        ],
+      );
+      return rows[0] ? rowToSchedule(rows[0]) : null;
+    },
+
+    async deleteSchedule(scheduleId, organizationId) {
+      const { rowCount } = await pool.query(
+        `DELETE FROM schedules sc
+          USING sites s
+          WHERE sc.id = $1
+            AND s.id = sc.site_id
+            AND s.organization_id = $2`,
+        [scheduleId, organizationId],
+      );
+      return (rowCount ?? 0) > 0;
+    },
+
+    async listRulesForSite(siteId) {
+      const { rows } = await pool.query<RuleRow>(
+        `SELECT id, site_id, label, enabled, zone_id, schedule_id, trigger, action
+           FROM rules
+          WHERE site_id = $1
+          ORDER BY created_at ASC`,
+        [siteId],
+      );
+      return rows.map(rowToRule);
+    },
+
+    async createRule(siteId, input) {
+      const { rows } = await pool.query<RuleRow>(
+        `INSERT INTO rules (site_id, label, enabled, zone_id, schedule_id, trigger, action)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+         RETURNING id, site_id, label, enabled, zone_id, schedule_id, trigger, action`,
+        [
+          siteId,
+          input.label,
+          input.enabled ?? true,
+          input.zoneId,
+          input.scheduleId,
+          JSON.stringify(input.trigger),
+          JSON.stringify(input.action),
+        ],
+      );
+      return rowToRule(rows[0]!);
+    },
+
+    async getRuleForOrg(ruleId, organizationId) {
+      const { rows } = await pool.query<RuleRow>(
+        `SELECT r.id, r.site_id, r.label, r.enabled, r.zone_id, r.schedule_id, r.trigger, r.action
+           FROM rules r
+           JOIN sites s ON s.id = r.site_id
+          WHERE r.id = $1 AND s.organization_id = $2`,
+        [ruleId, organizationId],
+      );
+      return rows[0] ? rowToRule(rows[0]) : null;
+    },
+
+    async updateRule(ruleId, organizationId, input) {
+      // Read-merge-write: scheduleId is nullable, so COALESCE can't tell
+      // "leave unchanged" (undefined) apart from "clear" (null).
+      return withTx(pool, async (client) => {
+        const { rows } = await client.query<RuleRow>(
+          `SELECT r.id, r.site_id, r.label, r.enabled, r.zone_id, r.schedule_id, r.trigger, r.action
+             FROM rules r
+             JOIN sites s ON s.id = r.site_id
+            WHERE r.id = $1 AND s.organization_id = $2
+            FOR UPDATE OF r`,
+          [ruleId, organizationId],
+        );
+        const current = rows[0];
+        if (!current) return null;
+        const next = {
+          label: input.label ?? current.label,
+          enabled: input.enabled ?? current.enabled,
+          zoneId: input.zoneId ?? current.zone_id,
+          scheduleId: input.scheduleId === undefined ? current.schedule_id : input.scheduleId,
+          trigger: input.trigger ?? current.trigger,
+          action: input.action ?? current.action,
+        };
+        const updated = await client.query<RuleRow>(
+          `UPDATE rules
+              SET label = $2, enabled = $3, zone_id = $4, schedule_id = $5,
+                  trigger = $6::jsonb, action = $7::jsonb, updated_at = now()
+            WHERE id = $1
+            RETURNING id, site_id, label, enabled, zone_id, schedule_id, trigger, action`,
+          [
+            ruleId,
+            next.label,
+            next.enabled,
+            next.zoneId,
+            next.scheduleId,
+            JSON.stringify(next.trigger),
+            JSON.stringify(next.action),
+          ],
+        );
+        return rowToRule(updated.rows[0]!);
+      });
+    },
+
+    async deleteRule(ruleId, organizationId) {
+      const { rowCount } = await pool.query(
+        `DELETE FROM rules r
+          USING sites s
+          WHERE r.id = $1
+            AND s.id = r.site_id
+            AND s.organization_id = $2`,
+        [ruleId, organizationId],
+      );
+      return (rowCount ?? 0) > 0;
+    },
+
+    async createPairing(organizationId, siteId, ttlSeconds = 600) {
       const id = randomUUID();
       const code = generatePairingCode();
       const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
       await pool.query(
-        `INSERT INTO pairings (id, organization_id, code, expires_at)
-         VALUES ($1, $2, $3, $4)`,
-        [id, organizationId, code, expiresAt],
+        `INSERT INTO pairings (id, organization_id, site_id, code, expires_at)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [id, organizationId, siteId, code, expiresAt],
       );
       return {
         id,
         organizationId,
+        siteId,
         code,
         expiresAt: expiresAt.toISOString(),
         redeemedConnectorId: null,
@@ -356,8 +857,12 @@ export function createStore(databaseUrl: string): Store {
 
     async redeemPairing(code, info) {
       return withTx(pool, async (client) => {
-        const { rows } = await client.query<{ id: string; organization_id: string }>(
-          `SELECT id, organization_id FROM pairings
+        const { rows } = await client.query<{
+          id: string;
+          organization_id: string;
+          site_id: string | null;
+        }>(
+          `SELECT id, organization_id, site_id FROM pairings
             WHERE code = $1
               AND redeemed_connector_id IS NULL
               AND expires_at > now()
@@ -367,6 +872,18 @@ export function createStore(databaseUrl: string): Store {
         const pairing = rows[0];
         if (!pairing) return null;
 
+        // Pairings created before 0006 (or whose site was deleted) carry no
+        // site — fall back to the org's oldest site. connectors.site_id is
+        // NOT NULL and every org always has at least one site.
+        let siteId = pairing.site_id;
+        if (!siteId) {
+          const fallback = await client.query<{ id: string }>(
+            `SELECT id FROM sites WHERE organization_id = $1 ORDER BY created_at ASC LIMIT 1`,
+            [pairing.organization_id],
+          );
+          siteId = fallback.rows[0]!.id;
+        }
+
         const connectorId = randomUUID();
         const token = generateConnectorToken();
         const tokenHash = hashToken(token);
@@ -374,10 +891,10 @@ export function createStore(databaseUrl: string): Store {
 
         const inserted = await client.query<ConnectorRow>(
           `INSERT INTO connectors
-             (id, organization_id, label, hostname, platform, version, status, token_hash, last_seen_at)
-           VALUES ($1, $2, $3, $4, $5, $6, 'online', $7, now())
-           RETURNING id, organization_id, label, hostname, platform, version, status, last_seen_at, created_at`,
-          [connectorId, pairing.organization_id, label, info.hostname, info.platform, info.version, tokenHash],
+             (id, organization_id, site_id, label, hostname, platform, version, status, token_hash, last_seen_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'online', $8, now())
+           RETURNING id, organization_id, site_id, label, hostname, platform, version, status, last_seen_at, created_at`,
+          [connectorId, pairing.organization_id, siteId, label, info.hostname, info.platform, info.version, tokenHash],
         );
 
         await client.query(
@@ -391,7 +908,7 @@ export function createStore(databaseUrl: string): Store {
 
     async authConnector(connectorId, token) {
       const { rows } = await pool.query<ConnectorRow & { token_hash: string }>(
-        `SELECT id, organization_id, label, hostname, platform, version, status, last_seen_at, created_at, token_hash
+        `SELECT id, organization_id, site_id, label, hostname, platform, version, status, last_seen_at, created_at, token_hash
            FROM connectors WHERE id = $1`,
         [connectorId],
       );
@@ -405,7 +922,7 @@ export function createStore(databaseUrl: string): Store {
 
     async listConnectorsForOrg(organizationId) {
       const { rows } = await pool.query<ConnectorRow>(
-        `SELECT id, organization_id, label, hostname, platform, version, status, last_seen_at, created_at
+        `SELECT id, organization_id, site_id, label, hostname, platform, version, status, last_seen_at, created_at
            FROM connectors
           WHERE organization_id = $1
           ORDER BY created_at DESC`,
@@ -416,7 +933,7 @@ export function createStore(databaseUrl: string): Store {
 
     async getConnectorForOrg(id, organizationId) {
       const { rows } = await pool.query<ConnectorRow>(
-        `SELECT id, organization_id, label, hostname, platform, version, status, last_seen_at, created_at
+        `SELECT id, organization_id, site_id, label, hostname, platform, version, status, last_seen_at, created_at
            FROM connectors
           WHERE id = $1 AND organization_id = $2`,
         [id, organizationId],

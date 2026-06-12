@@ -12,12 +12,17 @@ import { requireOperator } from "../auth.js";
 export function registerPairingRoutes(app: FastifyInstance, store: Store, env: Env): void {
   // Create a pairing for the operator's own org. The org id is derived from
   // the session — the request body never carries it, so cross-tenant misuse is
-  // structurally impossible.
+  // structurally impossible. The optional siteId picks where the connector
+  // will live; it defaults to the org's oldest site.
   app.post("/v1/pairings", async (req, reply) => {
     const user = await requireOperator(req, reply, store);
     if (!user) return;
-    CreatePairingRequestSchema.parse(req.body ?? {});
-    const pairing = await store.createPairing(user.organizationId);
+    const body = CreatePairingRequestSchema.parse(req.body ?? {});
+    const site = body.siteId
+      ? await store.getSiteForOrg(body.siteId, user.organizationId)
+      : await store.getDefaultSiteForOrg(user.organizationId);
+    if (!site) return reply.code(404).send({ error: "site not found" });
+    const pairing = await store.createPairing(user.organizationId, site.id);
     const response: CreatePairingResponse = {
       pairingId: pairing.id,
       code: pairing.code,

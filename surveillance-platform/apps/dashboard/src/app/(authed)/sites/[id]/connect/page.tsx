@@ -14,7 +14,7 @@ export default function PairConnectorPage({ params }: { params: { id: string } }
     setPending(true);
     setError(null);
     try {
-      const res = await api.createPairing();
+      const res = await api.createPairing(params.id);
       setCode(res.code);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

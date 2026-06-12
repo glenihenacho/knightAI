@@ -10,6 +10,7 @@ export const ConnectorStatusSchema = z.enum([
 export const ConnectorSchema = z.object({
   id: z.string().uuid(),
   organizationId: z.string().uuid(),
+  siteId: z.string().uuid(),
   label: z.string(),
   hostname: z.string().nullable(),
   platform: z.enum(["macos", "windows", "linux"]).nullable(),

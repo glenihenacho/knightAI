@@ -1,34 +1,18 @@
 import Link from "next/link";
-import { Eyebrow, SectionHead, StatusBadge } from "@surveillance/ui";
-import {
-  listCamerasServer,
-  listConnectorsServer,
-  listOrganizationsServer,
-  requireSession,
-} from "@/lib/server-api";
+import { SectionHead, StatusBadge, Table } from "@surveillance/ui";
+import { listCamerasServer, listConnectorsServer, listSitesServer } from "@/lib/server-api";
+import { AddSiteButton } from "./_components/add-site-button";
 
 export const dynamic = "force-dynamic";
 
+const COLUMNS = "1.4fr 1fr 1fr 1fr auto";
+
 export default async function SitesPage() {
-  const me = await requireSession();
-  const [{ cameras }, { connectors }, { organizations }] = await Promise.all([
+  const [{ sites }, { cameras }, { connectors }] = await Promise.all([
+    listSitesServer(),
     listCamerasServer(),
     listConnectorsServer(),
-    listOrganizationsServer(),
   ]);
-  const org = organizations.find((o) => o.id === me.user.organizationId);
-
-  // Phase 0: synthesize a single pseudo-site from the org's cameras + connectors.
-  // The real `sites` table arrives in Phase 1.
-  const siteId = me.user.organizationId;
-  const siteName = org?.name ?? "Default site";
-  const onlineConnectors = connectors.filter((c) => c.status === "online").length;
-  const aggregateStatus =
-    connectors.length === 0
-      ? "pending"
-      : onlineConnectors === connectors.length
-      ? "online"
-      : "offline";
 
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 32 }}>
@@ -41,73 +25,71 @@ export default async function SitesPage() {
             <span style={{ color: "var(--gold)", fontStyle: "italic" }}>operating logic.</span>
           </>
         }
-        intro="In Phase 0 every org maps to a single site. Phase 1 adds zones, schedules, and rules per site, and the polygon editor for camera-frame zones."
+        intro="A site is one physical location: its connectors, cameras, zones, schedules, and the rules that bind them. Open a site to draw zones and wire up rules."
       />
 
-      <div style={{ border: "1px solid var(--rule)" }}>
-        <div
-          style={{
-            padding: "14px 20px",
-            borderBottom: "1px solid var(--rule)",
-            display: "grid",
-            gridTemplateColumns: "1.4fr 1fr 1fr auto",
-            gap: 16,
-            alignItems: "center",
-            fontFamily: "var(--font-mono), 'JetBrains Mono', monospace",
-            fontSize: 10,
-            letterSpacing: "0.16em",
-            textTransform: "uppercase",
-            color: "var(--ink-2)",
-          }}
-        >
-          <span>Site</span>
-          <span>Cameras</span>
-          <span>Connectors</span>
-          <span>Status</span>
-        </div>
-        <Link
-          href={`/sites/${siteId}`}
-          style={{
-            padding: "20px",
-            display: "grid",
-            gridTemplateColumns: "1.4fr 1fr 1fr auto",
-            gap: 16,
-            alignItems: "center",
-            textDecoration: "none",
-            color: "inherit",
-            transition: "background 0.2s ease",
-          }}
-        >
-          <div>
-            <div
-              style={{
-                fontFamily: "var(--font-serif), 'Instrument Serif', serif",
-                fontSize: 24,
-                lineHeight: 1.1,
-              }}
-            >
-              {siteName}
-            </div>
-            <div style={{ color: "var(--ink-2)", fontSize: 13, marginTop: 4 }}>
-              Synthesized site — Phase 1 introduces real site records.
-            </div>
-          </div>
-          <div style={{ fontFamily: "var(--font-serif), 'Instrument Serif', serif", fontSize: 28, color: "var(--gold)" }}>
-            {cameras.length}
-          </div>
-          <div style={{ fontFamily: "var(--font-serif), 'Instrument Serif', serif", fontSize: 28, color: "var(--gold)" }}>
-            {connectors.length}
-          </div>
-          <StatusBadge status={aggregateStatus} />
-        </Link>
+      <div>
+        <AddSiteButton />
       </div>
 
-      <p style={{ color: "var(--ink-2)", fontSize: 13 }}>
-        <Eyebrow>Soon</Eyebrow>
-        <br />
-        Multi-site organizations land alongside the Site Logic Engine. For now, every connector and
-        camera you pair lives under <strong style={{ color: "var(--ink)" }}>{siteName}</strong>.
-      </p>
+      <Table columns={["Site", "Timezone", "Cameras", "Connectors", "Status"]} templateColumns={COLUMNS}>
+        {sites.map((site, i) => {
+          const siteConnectors = connectors.filter((c) => c.siteId === site.id);
+          const connectorIds = new Set(siteConnectors.map((c) => c.id));
+          const siteCameras = cameras.filter((cam) => connectorIds.has(cam.connectorId));
+          const online = siteConnectors.filter((c) => c.status === "online").length;
+          const aggregateStatus =
+            siteConnectors.length === 0
+              ? "pending"
+              : online === siteConnectors.length
+              ? "online"
+              : "offline";
+          return (
+            <Link
+              key={site.id}
+              href={`/sites/${site.id}`}
+              style={{
+                padding: "20px",
+                display: "grid",
+                gridTemplateColumns: COLUMNS,
+                gap: 16,
+                alignItems: "center",
+                textDecoration: "none",
+                color: "inherit",
+                borderTop: i === 0 ? "none" : "1px solid var(--rule)",
+                transition: "background 0.2s ease",
+              }}
+            >
+              <div
+                style={{
+                  fontFamily: "var(--font-serif), 'Instrument Serif', serif",
+                  fontSize: 24,
+                  lineHeight: 1.1,
+                }}
+              >
+                {site.label}
+              </div>
+              <div
+                style={{
+                  fontFamily: "var(--font-mono), 'JetBrains Mono', monospace",
+                  fontSize: 11,
+                  letterSpacing: "0.1em",
+                  color: "var(--ink-2)",
+                }}
+              >
+                {site.timezone}
+              </div>
+              <div style={{ fontFamily: "var(--font-serif), 'Instrument Serif', serif", fontSize: 28, color: "var(--gold)" }}>
+                {siteCameras.length}
+              </div>
+              <div style={{ fontFamily: "var(--font-serif), 'Instrument Serif', serif", fontSize: 28, color: "var(--gold)" }}>
+                {siteConnectors.length}
+              </div>
+              <StatusBadge status={aggregateStatus} />
+            </Link>
+          );
+        })}
+      </Table>
     </section>
   );
 }

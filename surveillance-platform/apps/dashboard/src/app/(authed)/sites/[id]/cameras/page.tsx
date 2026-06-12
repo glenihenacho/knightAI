@@ -1,14 +1,20 @@
 import Link from "next/link";
 import { CameraPreview, Eyebrow } from "@surveillance/ui";
 import { SNAPSHOT_URL } from "@/lib/api";
-import { listCamerasServer } from "@/lib/server-api";
+import { listCamerasServer, listConnectorsServer } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
 
-export default async function SiteCamerasPage() {
-  const { cameras } = await listCamerasServer();
+export default async function SiteCamerasPage({ params }: { params: { id: string } }) {
+  const [{ cameras }, { connectors }] = await Promise.all([
+    listCamerasServer(),
+    listConnectorsServer(),
+  ]);
+  // Cameras inherit their site through the connector they're registered on.
+  const siteConnectorIds = new Set(connectors.filter((c) => c.siteId === params.id).map((c) => c.id));
+  const siteCameras = cameras.filter((cam) => siteConnectorIds.has(cam.connectorId));
 
-  if (cameras.length === 0) {
+  if (siteCameras.length === 0) {
     return (
       <div
         style={{
@@ -19,7 +25,7 @@ export default async function SiteCamerasPage() {
       >
         <Eyebrow>No cameras yet</Eyebrow>
         <p style={{ color: "var(--ink-2)", marginTop: 12 }}>
-          Pair a connector first, then add cameras to it.
+          Pair a connector at this site first, then add cameras to it.
         </p>
       </div>
     );
@@ -33,7 +39,7 @@ export default async function SiteCamerasPage() {
         gap: 24,
       }}
     >
-      {cameras.map((cam) => (
+      {siteCameras.map((cam) => (
         <div key={cam.id} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <CameraPreview
             label={cam.label}

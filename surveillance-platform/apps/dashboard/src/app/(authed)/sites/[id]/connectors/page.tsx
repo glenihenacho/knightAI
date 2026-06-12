@@ -3,8 +3,9 @@ import { listConnectorsServer } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
 
-export default async function SiteConnectorsPage() {
-  const { connectors } = await listConnectorsServer();
+export default async function SiteConnectorsPage({ params }: { params: { id: string } }) {
+  const { connectors: allConnectors } = await listConnectorsServer();
+  const connectors = allConnectors.filter((c) => c.siteId === params.id);
 
   if (connectors.length === 0) {
     return (

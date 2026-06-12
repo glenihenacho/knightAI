@@ -35,14 +35,19 @@ async function wipeDb() {
   const client = new Client({ connectionString: DATABASE_URL });
   await client.connect();
   await client.query(`
+    DROP TABLE IF EXISTS rules CASCADE;
+    DROP TABLE IF EXISTS schedules CASCADE;
+    DROP TABLE IF EXISTS zones CASCADE;
     DROP TABLE IF EXISTS invites CASCADE;
     DROP TABLE IF EXISTS sessions CASCADE;
     DROP TABLE IF EXISTS magic_links CASCADE;
     DROP TABLE IF EXISTS users CASCADE;
     DROP TABLE IF EXISTS commands CASCADE;
     DROP TABLE IF EXISTS cameras CASCADE;
+    DROP TABLE IF EXISTS previews CASCADE;
     DROP TABLE IF EXISTS connectors CASCADE;
     DROP TABLE IF EXISTS pairings CASCADE;
+    DROP TABLE IF EXISTS sites CASCADE;
     DROP TABLE IF EXISTS organizations CASCADE;
     DROP TABLE IF EXISTS _migrations CASCADE;
     DROP TYPE IF EXISTS connector_status CASCADE;
@@ -687,11 +692,15 @@ async function main() {
       "INSERT INTO organizations (name) VALUES ('Other Co') RETURNING id",
     );
     const otherOrgId = otherOrg.rows[0]!.id;
-    await sql.query(
-      `INSERT INTO connectors (organization_id, label, hostname, platform, version, status, token_hash, last_seen_at)
-       VALUES ($1, 'foreign', 'foreign-host', 'linux', '0.1.0', 'online',
-               '0000000000000000000000000000000000000000000000000000000000000000', now())`,
+    const otherSite = await sql.query<{ id: string }>(
+      "INSERT INTO sites (organization_id, label) VALUES ($1, 'Default site') RETURNING id",
       [otherOrgId],
+    );
+    await sql.query(
+      `INSERT INTO connectors (organization_id, site_id, label, hostname, platform, version, status, token_hash, last_seen_at)
+       VALUES ($1, $2, 'foreign', 'foreign-host', 'linux', '0.1.0', 'online',
+               '0000000000000000000000000000000000000000000000000000000000000000', now())`,
+      [otherOrgId, otherSite.rows[0]!.id],
     );
     await sql.end();
 
@@ -709,6 +718,358 @@ async function main() {
       body: fakeJpeg,
     });
     check("path-traversal upload key 400", badKeyRes.status === 400);
+
+    // ===== Phase 1 / M1a: sites =====
+    const sitesRes = await fetch(`${API}/v1/sites`, { headers: { cookie: cookieHeader } });
+    check("GET /v1/sites 200", sitesRes.status === 200);
+    const { sites } = await sitesRes.json();
+    check(
+      "seed org has exactly one Default site",
+      sites.length === 1 && sites[0].label === "Default site",
+      sites.map((s: { label: string }) => s.label),
+    );
+    const defaultSiteId = sites[0].id as string;
+
+    // The connector paired earlier (no siteId in body) landed on the default site.
+    const connsAfterSites = await fetch(`${API}/v1/connectors`, { headers: { cookie: cookieHeader } });
+    const connsList = await connsAfterSites.json();
+    const pairedConn = connsList.connectors.find((c: { id: string }) => c.id === redeemed.connectorId);
+    check("connector defaulted to the org's default site", pairedConn?.siteId === defaultSiteId);
+
+    const createSiteRes = await fetch(`${API}/v1/sites`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ label: "Warehouse A", timezone: "America/Los_Angeles" }),
+    });
+    check("POST /v1/sites 201", createSiteRes.status === 201);
+    const { site: warehouse } = await createSiteRes.json();
+    check("created site carries timezone", warehouse.timezone === "America/Los_Angeles");
+
+    const dupSiteRes = await fetch(`${API}/v1/sites`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ label: "warehouse a" }),
+    });
+    check("duplicate site label (case-insensitive) 409", dupSiteRes.status === 409);
+
+    const badTzRes = await fetch(`${API}/v1/sites`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ label: "Bad TZ", timezone: "Mars/Olympus_Mons" }),
+    });
+    check("unknown timezone 400", badTzRes.status === 400);
+
+    const crossOrgSiteRes = await fetch(
+      `${API}/v1/sites/00000000-0000-0000-0000-000000000000`,
+      { headers: { cookie: cookieHeader } },
+    );
+    check("GET cross-org/unknown site 404", crossOrgSiteRes.status === 404);
+
+    const patchSiteRes = await fetch(`${API}/v1/sites/${warehouse.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ label: "Warehouse A (north)" }),
+    });
+    check("PATCH site label 200", patchSiteRes.status === 200);
+    const patched = await patchSiteRes.json();
+    check("PATCH site returns new label", patched.site.label === "Warehouse A (north)");
+
+    // Pair a second connector explicitly onto the warehouse site.
+    const sitePairRes = await fetch(`${API}/v1/pairings`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ siteId: warehouse.id }),
+    });
+    check("POST /v1/pairings with siteId 201", sitePairRes.status === 201);
+    const sitePairing = await sitePairRes.json();
+    const siteRedeemRes = await fetch(`${API}/v1/pairings/redeem`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code: sitePairing.code,
+        hostname: "warehouse-box",
+        platform: "linux",
+        version: "0.1.0",
+      }),
+    });
+    const siteRedeemed = await siteRedeemRes.json();
+    const connsRes2 = await fetch(`${API}/v1/connectors`, { headers: { cookie: cookieHeader } });
+    const conns2 = await connsRes2.json();
+    const warehouseConn = conns2.connectors.find(
+      (c: { id: string }) => c.id === siteRedeemed.connectorId,
+    );
+    check("redeemed connector attached to chosen site", warehouseConn?.siteId === warehouse.id);
+
+    const delAttachedRes = await fetch(`${API}/v1/sites/${warehouse.id}`, {
+      method: "DELETE",
+      headers: { cookie: cookieHeader },
+    });
+    check("DELETE site with connectors 409", delAttachedRes.status === 409);
+
+    const tempSiteRes = await fetch(`${API}/v1/sites`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ label: "Temp site" }),
+    });
+    const { site: tempSite } = await tempSiteRes.json();
+    const delEmptyRes = await fetch(`${API}/v1/sites/${tempSite.id}`, {
+      method: "DELETE",
+      headers: { cookie: cookieHeader },
+    });
+    check("DELETE empty site 204", delEmptyRes.status === 204);
+    const goneRes = await fetch(`${API}/v1/sites/${tempSite.id}`, {
+      headers: { cookie: cookieHeader },
+    });
+    check("deleted site 404", goneRes.status === 404);
+
+    // ===== Phase 1 / M1b: zones =====
+    const lobbyPolygon = [
+      { x: 0.1, y: 0.1 },
+      { x: 0.6, y: 0.12 },
+      { x: 0.55, y: 0.7 },
+      { x: 0.12, y: 0.65 },
+    ];
+    const createZoneRes = await fetch(`${API}/v1/cameras/${camera.id}/zones`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ label: "Lobby", polygon: lobbyPolygon }),
+    });
+    check("POST zone 201", createZoneRes.status === 201);
+    const { zone: lobbyZone } = await createZoneRes.json();
+    check("zone polygon round-trips", JSON.stringify(lobbyZone.polygon) === JSON.stringify(lobbyPolygon));
+
+    const listZonesRes = await fetch(`${API}/v1/cameras/${camera.id}/zones`, {
+      headers: { cookie: cookieHeader },
+    });
+    const zonesList = await listZonesRes.json();
+    check("GET zones lists the created zone", zonesList.zones.length === 1 && zonesList.zones[0].id === lobbyZone.id);
+
+    const tooFewRes = await fetch(`${API}/v1/cameras/${camera.id}/zones`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ label: "Line", polygon: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }),
+    });
+    check("zone with <3 points 400", tooFewRes.status === 400);
+
+    const outOfRangeRes = await fetch(`${API}/v1/cameras/${camera.id}/zones`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        label: "Out",
+        polygon: [{ x: -0.1, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1.5 }],
+      }),
+    });
+    check("zone with out-of-range coords 400", outOfRangeRes.status === 400);
+
+    const zonesUnknownCamRes = await fetch(
+      `${API}/v1/cameras/00000000-0000-0000-0000-000000000000/zones`,
+      { headers: { cookie: cookieHeader } },
+    );
+    check("GET zones for unknown camera 404", zonesUnknownCamRes.status === 404);
+
+    const patchZoneRes = await fetch(`${API}/v1/zones/${lobbyZone.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ label: "Lobby (front)" }),
+    });
+    check("PATCH zone 200", patchZoneRes.status === 200);
+    const patchedZone = await patchZoneRes.json();
+    check("PATCH zone keeps polygon", patchedZone.zone.polygon.length === 4);
+
+    // Camera delete cascades zones (FK ON DELETE CASCADE) — via SQL since
+    // there's no camera DELETE endpoint yet.
+    const cascadeCamRes = await fetch(`${API}/v1/cameras`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        connectorId: redeemed.connectorId,
+        label: "Cascade cam",
+        rtspUrl: "rtsp://example.com:554/cascade",
+      }),
+    });
+    const { camera: cascadeCam } = await cascadeCamRes.json();
+    await fetch(`${API}/v1/cameras/${cascadeCam.id}/zones`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ label: "Doomed", polygon: lobbyPolygon }),
+    });
+    const cascadeSql = new Client({ connectionString: DATABASE_URL });
+    await cascadeSql.connect();
+    await cascadeSql.query("DELETE FROM commands WHERE camera_id = $1", [cascadeCam.id]);
+    await cascadeSql.query("DELETE FROM cameras WHERE id = $1", [cascadeCam.id]);
+    const orphanZones = await cascadeSql.query(
+      "SELECT count(*)::int AS n FROM zones WHERE camera_id = $1",
+      [cascadeCam.id],
+    );
+    await cascadeSql.end();
+    check("deleting camera cascades zones", orphanZones.rows[0]?.n === 0);
+
+    // ===== Phase 1 / M1c: schedules =====
+    const businessWindows = [1, 2, 3, 4, 5].map((dayOfWeek) => ({
+      dayOfWeek,
+      startMinute: 9 * 60,
+      endMinute: 17 * 60,
+    }));
+    const createSchedRes = await fetch(`${API}/v1/sites/${defaultSiteId}/schedules`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ label: "Business hours", windows: businessWindows }),
+    });
+    check("POST schedule 201", createSchedRes.status === 201);
+    const { schedule: businessSched } = await createSchedRes.json();
+    check("schedule serialized 5 windows", businessSched.windows.length === 5);
+
+    const badWindowRes = await fetch(`${API}/v1/sites/${defaultSiteId}/schedules`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        label: "Backwards",
+        windows: [{ dayOfWeek: 1, startMinute: 600, endMinute: 540 }],
+      }),
+    });
+    check("schedule window end<=start 400", badWindowRes.status === 400);
+
+    const listSchedRes = await fetch(`${API}/v1/sites/${defaultSiteId}/schedules`, {
+      headers: { cookie: cookieHeader },
+    });
+    const schedList = await listSchedRes.json();
+    check("GET schedules lists created", schedList.schedules.length === 1);
+
+    const schedCrossOrgRes = await fetch(
+      `${API}/v1/sites/00000000-0000-0000-0000-000000000000/schedules`,
+      { headers: { cookie: cookieHeader } },
+    );
+    check("GET schedules for unknown site 404", schedCrossOrgRes.status === 404);
+
+    // Site delete cascades schedules.
+    const cascadeSiteRes = await fetch(`${API}/v1/sites`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ label: "Cascade site" }),
+    });
+    const { site: cascadeSite } = await cascadeSiteRes.json();
+    const cascadeSchedRes = await fetch(`${API}/v1/sites/${cascadeSite.id}/schedules`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        label: "Doomed",
+        windows: [{ dayOfWeek: 0, startMinute: 0, endMinute: 60 }],
+      }),
+    });
+    const { schedule: doomedSched } = await cascadeSchedRes.json();
+    await fetch(`${API}/v1/sites/${cascadeSite.id}`, {
+      method: "DELETE",
+      headers: { cookie: cookieHeader },
+    });
+    const schedSql = new Client({ connectionString: DATABASE_URL });
+    await schedSql.connect();
+    const orphanSched = await schedSql.query(
+      "SELECT count(*)::int AS n FROM schedules WHERE id = $1",
+      [doomedSched.id],
+    );
+    await schedSql.end();
+    check("deleting site cascades schedules", orphanSched.rows[0]?.n === 0);
+
+    // ===== Phase 1 / M1d: rules =====
+    const createRuleRes = await fetch(`${API}/v1/sites/${defaultSiteId}/rules`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        label: "Lobby after hours",
+        zoneId: lobbyZone.id,
+        scheduleId: businessSched.id,
+        trigger: { type: "presence_in_zone", params: {} },
+        action: { type: "raise_event", severity: "high" },
+      }),
+    });
+    check("POST rule 201", createRuleRes.status === 201);
+    const { rule: lobbyRule } = await createRuleRes.json();
+    check("rule defaults enabled", lobbyRule.enabled === true);
+    check("rule severity round-trips", lobbyRule.action.severity === "high");
+
+    // Schedule belonging to a different site is rejected.
+    const whSchedRes = await fetch(`${API}/v1/sites/${warehouse.id}/schedules`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        label: "Warehouse hours",
+        windows: [{ dayOfWeek: 1, startMinute: 0, endMinute: 720 }],
+      }),
+    });
+    const { schedule: whSched } = await whSchedRes.json();
+    const wrongSchedRuleRes = await fetch(`${API}/v1/sites/${defaultSiteId}/rules`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        label: "Wrong sched",
+        zoneId: lobbyZone.id,
+        scheduleId: whSched.id,
+        trigger: { type: "presence_in_zone", params: {} },
+        action: { type: "raise_event", severity: "low" },
+      }),
+    });
+    check("rule with schedule from different site 422", wrongSchedRuleRes.status === 422);
+
+    // Zone belonging to a different site is rejected: register a camera on the
+    // warehouse connector, draw a zone there, then reference it from the
+    // default site.
+    const whCamRes = await fetch(`${API}/v1/cameras`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        connectorId: siteRedeemed.connectorId,
+        label: "Warehouse cam",
+        rtspUrl: "rtsp://example.com:554/warehouse",
+      }),
+    });
+    const { camera: whCam } = await whCamRes.json();
+    const whZoneRes = await fetch(`${API}/v1/cameras/${whCam.id}/zones`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ label: "Dock", polygon: lobbyPolygon }),
+    });
+    const { zone: whZone } = await whZoneRes.json();
+    const wrongZoneRuleRes = await fetch(`${API}/v1/sites/${defaultSiteId}/rules`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        label: "Wrong zone",
+        zoneId: whZone.id,
+        trigger: { type: "presence_in_zone", params: {} },
+        action: { type: "raise_event", severity: "low" },
+      }),
+    });
+    check("rule with zone from different site 422", wrongZoneRuleRes.status === 422);
+
+    const toggleRuleRes = await fetch(`${API}/v1/rules/${lobbyRule.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ enabled: false }),
+    });
+    check("PATCH rule enabled=false 200", toggleRuleRes.status === 200);
+    const toggledRule = await toggleRuleRes.json();
+    check("rule toggle persisted", toggledRule.rule.enabled === false);
+
+    const listRulesRes = await fetch(`${API}/v1/sites/${defaultSiteId}/rules`, {
+      headers: { cookie: cookieHeader },
+    });
+    const rulesList = await listRulesRes.json();
+    check(
+      "GET rules lists the rule (disabled)",
+      rulesList.rules.length === 1 && rulesList.rules[0].enabled === false,
+    );
+
+    // Deleting the zone cascades the rule.
+    const delZoneRes = await fetch(`${API}/v1/zones/${lobbyZone.id}`, {
+      method: "DELETE",
+      headers: { cookie: cookieHeader },
+    });
+    check("DELETE zone 204", delZoneRes.status === 204);
+    const rulesAfterZoneDel = await fetch(`${API}/v1/sites/${defaultSiteId}/rules`, {
+      headers: { cookie: cookieHeader },
+    });
+    const rulesAfter = await rulesAfterZoneDel.json();
+    check("deleting zone cascades rules", rulesAfter.rules.length === 0);
 
     // ===== Logout =====
     const logoutRes = await fetch(`${API}/v1/auth/logout`, {

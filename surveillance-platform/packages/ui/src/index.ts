@@ -6,3 +6,8 @@ export { Eyebrow } from "./Eyebrow.js";
 export { Card } from "./Card.js";
 export { Stat } from "./Stat.js";
 export { SectionHead } from "./SectionHead.js";
+export { Input, fieldLabelStyle, fieldControlStyle } from "./Input.js";
+export { Select } from "./Select.js";
+export type { SelectOption } from "./Select.js";
+export { Modal } from "./Modal.js";
+export { Table, TableRow } from "./Table.js";

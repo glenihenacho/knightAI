@@ -17,6 +17,11 @@ import { registerOrganizationRoutes } from "./routes/organizations.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerInviteRoutes } from "./routes/invites.js";
 import { registerPreviewRoutes } from "./routes/previews.js";
+import { registerSiteRoutes } from "./routes/sites.js";
+import { registerZoneRoutes } from "./routes/zones.js";
+import { registerScheduleRoutes } from "./routes/schedules.js";
+import { registerRuleRoutes } from "./routes/rules.js";
+import { ZodError } from "zod";
 
 async function main() {
   const env = loadEnv();
@@ -39,6 +44,19 @@ async function main() {
   });
   await app.register(cookie);
   await app.register(multipart, { limits: { fileSize: 25 * 1024 * 1024 } });
+
+  // Routes validate bodies with `Schema.parse(...)`; surface those as 400s
+  // with the offending paths instead of Fastify's default 500.
+  app.setErrorHandler((err, req, reply) => {
+    if (err instanceof ZodError) {
+      return reply.code(400).send({
+        error: "invalid request body",
+        issues: err.issues.map((i) => ({ path: i.path.join("."), message: i.message })),
+      });
+    }
+    req.log.error({ err }, "unhandled route error");
+    return reply.code(err.statusCode ?? 500).send({ error: err.message });
+  });
 
   // Snapshot + HLS uploads stream raw bytes; bypass body parsing so the route
   // handler can read req.raw. m3u8 is text but we treat it as an opaque blob.
@@ -77,6 +95,10 @@ async function main() {
   registerAuthRoutes(app, store, env, email);
   registerOrganizationRoutes(app, store);
   registerInviteRoutes(app, store, env, email);
+  registerSiteRoutes(app, store);
+  registerZoneRoutes(app, store);
+  registerScheduleRoutes(app, store);
+  registerRuleRoutes(app, store);
   registerPairingRoutes(app, store, env);
   registerConnectorRoutes(app, store);
   registerCameraRoutes(app, store);

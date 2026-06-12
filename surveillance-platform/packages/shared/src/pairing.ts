@@ -5,9 +5,11 @@ export const PairingCodeSchema = z
   .regex(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/, "expected XXXX-XXXX format");
 
 // The organization is derived from the authenticated operator's session, so
-// the body only carries the optional label.
+// the body only carries the optional label and target site. When siteId is
+// omitted the API falls back to the org's oldest site.
 export const CreatePairingRequestSchema = z.object({
   label: z.string().min(1).max(120).optional(),
+  siteId: z.string().uuid().optional(),
 });
 
 export const CreatePairingResponseSchema = z.object({

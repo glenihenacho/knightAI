@@ -6,3 +6,7 @@ export * from "./connector.js";
 export * from "./user.js";
 export * from "./invite.js";
 export * from "./preview.js";
+export * from "./site.js";
+export * from "./zone.js";
+export * from "./schedule.js";
+export * from "./rule.js";
