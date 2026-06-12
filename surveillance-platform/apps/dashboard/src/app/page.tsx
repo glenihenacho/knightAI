@@ -8,7 +8,7 @@ export const metadata = {
     "GoldCrusade helps security companies turn surveillance into a premium service clients can see, understand, and trust.",
 };
 
-const MAIL_DEMO = "mailto:hello@goldcrusade.example";
+const DEMO_URL = "https://cal.com/goldcrusade/15min";
 
 export default function MarketingLanding() {
   return (
@@ -376,7 +376,7 @@ export default function MarketingLanding() {
       <section className="gc-final" id="demo">
         <div className="gc-wrap gc-r" data-reveal="1">
           <span className="gc-eyebrow gc-gold gc-shine" data-shine="1">
-            Private demo · 30 minutes
+            Private demo · 15 minutes
           </span>
           <h2>
             Make every site
@@ -391,7 +391,13 @@ export default function MarketingLanding() {
             intelligence layer.
           </p>
           <div className="gc-ctas">
-            <a className="gc-btn gc-primary" href={MAIL_DEMO} data-pointer-track="1">
+            <a
+              className="gc-btn gc-primary"
+              href={DEMO_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              data-pointer-track="1"
+            >
               Book a Private Demo <span className="gc-arrow">→</span>
             </a>
             <a className="gc-btn" href="#product" data-pointer-track="1">
@@ -408,7 +414,9 @@ export default function MarketingLanding() {
             <a href="#">Privacy</a>
             <a href="#">Security</a>
             <a href="#">Status</a>
-            <a href={MAIL_DEMO}>Contact</a>
+            <a href={DEMO_URL} target="_blank" rel="noopener noreferrer">
+              Contact
+            </a>
           </div>
         </div>
       </footer>
