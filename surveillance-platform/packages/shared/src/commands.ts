@@ -6,6 +6,11 @@ export const CommandKindSchema = z.enum([
   "ping",
   "start_preview",
   "stop_preview",
+  // "Preview but no operator is watching": the connector runs the exact same
+  // FFmpeg -> HLS -> upload pipeline; the API owns the heartbeat and the
+  // server-side worker consumes the segments for detection.
+  "start_detection",
+  "stop_detection",
 ]);
 
 export const ValidateRtspPayloadSchema = z.object({
@@ -66,6 +71,18 @@ export const CommandSchema = z.discriminatedUnion("kind", [
   z.object({
     id: z.string().uuid(),
     kind: z.literal("stop_preview"),
+    issuedAt: z.string().datetime(),
+    payload: StopPreviewPayloadSchema,
+  }),
+  z.object({
+    id: z.string().uuid(),
+    kind: z.literal("start_detection"),
+    issuedAt: z.string().datetime(),
+    payload: StartPreviewPayloadSchema,
+  }),
+  z.object({
+    id: z.string().uuid(),
+    kind: z.literal("stop_detection"),
     issuedAt: z.string().datetime(),
     payload: StopPreviewPayloadSchema,
   }),

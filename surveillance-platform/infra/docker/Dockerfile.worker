@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1.7
+# Detection worker container for Fly.io. Build context is the workspace root
+# (same as Dockerfile.api).
+#
+# Debian-slim, not alpine: onnxruntime-node ships glibc prebuilds only.
+# FFmpeg comes from apt — the worker spawns one per segment for frame
+# extraction.
+
+FROM node:20-slim AS base
+WORKDIR /repo
+RUN corepack enable
+
+# --- deps: install only what the worker needs, with a frozen lockfile ---
+FROM base AS deps
+# .npmrc carries onnxruntime-node-install-cuda=skip (CPU package only).
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json tsconfig.base.json .npmrc ./
+COPY apps/worker/package.json apps/worker/
+COPY packages/shared/package.json packages/shared/
+RUN pnpm install --frozen-lockfile --filter @surveillance/worker...
+
+# --- build: compile TS to apps/worker/dist ---
+FROM deps AS build
+COPY packages/shared packages/shared
+COPY apps/worker apps/worker
+RUN pnpm --filter @surveillance/shared build \
+ && pnpm --filter @surveillance/worker build
+
+# --- runtime ---
+FROM node:20-slim AS runtime
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg tini \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd -r app && useradd -r -g app app
+WORKDIR /repo
+COPY --from=build --chown=app:app /repo /repo
+WORKDIR /repo/apps/worker
+ENV NODE_ENV=production \
+    METRICS_PORT=9100
+USER app
+EXPOSE 9100
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "dist/main.js"]

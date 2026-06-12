@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { CreateZoneRequestSchema, UpdateZoneRequestSchema } from "@surveillance/shared";
 import type { Store } from "../db/store.js";
 import { requireOperator } from "../auth.js";
+import { notifyConfigChanged } from "../detection.js";
 
 export function registerZoneRoutes(app: FastifyInstance, store: Store): void {
   app.get("/v1/cameras/:cameraId/zones", async (req, reply) => {
@@ -21,6 +22,7 @@ export function registerZoneRoutes(app: FastifyInstance, store: Store): void {
     if (!camera) return reply.code(404).send({ error: "camera not found" });
     const body = CreateZoneRequestSchema.parse(req.body);
     const zone = await store.createZone(cameraId, body);
+    notifyConfigChanged(store, req.log);
     return reply.code(201).send({ zone });
   });
 
@@ -31,6 +33,7 @@ export function registerZoneRoutes(app: FastifyInstance, store: Store): void {
     const body = UpdateZoneRequestSchema.parse(req.body);
     const zone = await store.updateZone(id, user.organizationId, body);
     if (!zone) return reply.code(404).send({ error: "zone not found" });
+    notifyConfigChanged(store, req.log);
     return { zone };
   });
 
@@ -40,6 +43,7 @@ export function registerZoneRoutes(app: FastifyInstance, store: Store): void {
     const { id } = req.params as { id: string };
     const deleted = await store.deleteZone(id, user.organizationId);
     if (!deleted) return reply.code(404).send({ error: "zone not found" });
+    notifyConfigChanged(store, req.log);
     return reply.code(204).send();
   });
 }

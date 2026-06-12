@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { CreateScheduleRequestSchema, UpdateScheduleRequestSchema } from "@surveillance/shared";
 import type { Store } from "../db/store.js";
 import { requireOperator } from "../auth.js";
+import { notifyConfigChanged } from "../detection.js";
 
 // Postgres unique_violation — schedules_site_label_uniq.
 function isUniqueViolation(err: unknown): boolean {
@@ -27,6 +28,7 @@ export function registerScheduleRoutes(app: FastifyInstance, store: Store): void
     const body = CreateScheduleRequestSchema.parse(req.body);
     try {
       const schedule = await store.createSchedule(siteId, body);
+      notifyConfigChanged(store, req.log);
       return reply.code(201).send({ schedule });
     } catch (err) {
       if (isUniqueViolation(err)) {
@@ -44,6 +46,7 @@ export function registerScheduleRoutes(app: FastifyInstance, store: Store): void
     try {
       const schedule = await store.updateSchedule(id, user.organizationId, body);
       if (!schedule) return reply.code(404).send({ error: "schedule not found" });
+      notifyConfigChanged(store, req.log);
       return { schedule };
     } catch (err) {
       if (isUniqueViolation(err)) {
@@ -59,6 +62,7 @@ export function registerScheduleRoutes(app: FastifyInstance, store: Store): void
     const { id } = req.params as { id: string };
     const deleted = await store.deleteSchedule(id, user.organizationId);
     if (!deleted) return reply.code(404).send({ error: "schedule not found" });
+    notifyConfigChanged(store, req.log);
     return reply.code(204).send();
   });
 }

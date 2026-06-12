@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Event as EventRecord, Severity, Site } from "@surveillance/shared";
 import { Button, Eyebrow, Select, Table, TableRow } from "@surveillance/ui";
 import { api, SNAPSHOT_URL } from "@/lib/api";
+import { EventClipModal } from "@/app/_components/event-clip-player";
 
 const COLUMNS = "0.9fr 1.2fr 1fr 1fr 0.8fr 0.6fr auto";
 const POLL_MS = 10_000;
@@ -12,12 +13,19 @@ const PAGE_SIZE = 50;
 export function EventsFeed({
   initialEvents,
   sites,
+  fixedSiteId,
+  compact = false,
 }: {
   initialEvents: EventRecord[];
   sites: Site[];
+  /** Pin the feed to one site (per-site Events tab) — hides the site filter. */
+  fixedSiteId?: string;
+  /** Drop the page header when embedded in a site tab. */
+  compact?: boolean;
 }) {
   const [events, setEvents] = useState<EventRecord[]>(initialEvents);
-  const [siteId, setSiteId] = useState("");
+  const [siteId, setSiteId] = useState(fixedSiteId ?? "");
+  const [openEvent, setOpenEvent] = useState<EventRecord | null>(null);
   const [severity, setSeverity] = useState("");
   const [loadingMore, setLoadingMore] = useState(false);
   const [exhausted, setExhausted] = useState(initialEvents.length < PAGE_SIZE);
@@ -71,6 +79,7 @@ export function EventsFeed({
 
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 32 }}>
+      {!compact && (
       <div>
         <Eyebrow gold>Pillar 02 / Behavior Intelligence</Eyebrow>
         <h1
@@ -87,21 +96,24 @@ export function EventsFeed({
         </h1>
         <p style={{ color: "var(--ink-2)", marginTop: 12, maxWidth: 620 }}>
           Rules firing on live camera feeds — presence, dwell, and re-entry,
-          evaluated on the connector so footage never leaves the site. The feed
+          evaluated continuously by the detection worker. The feed
           refreshes every {POLL_MS / 1000} seconds.
         </p>
       </div>
+      )}
 
       <div style={{ display: "flex", gap: 16, maxWidth: 520 }}>
-        <Select
-          label="Site"
-          value={siteId}
-          onChange={setSiteId}
-          options={[
-            { value: "", label: "All sites" },
-            ...sites.map((s) => ({ value: s.id, label: s.label })),
-          ]}
-        />
+        {!fixedSiteId && (
+          <Select
+            label="Site"
+            value={siteId}
+            onChange={setSiteId}
+            options={[
+              { value: "", label: "All sites" },
+              ...sites.map((s) => ({ value: s.id, label: s.label })),
+            ]}
+          />
+        )}
         <Select
           label="Severity"
           value={severity}
@@ -158,7 +170,24 @@ export function EventsFeed({
                 {ev.severity}
               </Mono>
               <Mono>{formatDetail(ev)}</Mono>
-              {ev.snapshotKey ? (
+              {ev.segmentKey ? (
+                <button
+                  onClick={() => setOpenEvent(ev)}
+                  style={{
+                    border: "none",
+                    background: "none",
+                    cursor: "pointer",
+                    padding: 0,
+                    fontFamily: "var(--font-mono), 'JetBrains Mono', monospace",
+                    fontSize: 11,
+                    letterSpacing: "0.08em",
+                    textTransform: "uppercase",
+                    color: "var(--gold)",
+                  }}
+                >
+                  clip ▸
+                </button>
+              ) : ev.snapshotKey ? (
                 <a
                   href={SNAPSHOT_URL(ev.snapshotKey)}
                   target="_blank"
@@ -188,6 +217,8 @@ export function EventsFeed({
           </Button>
         </div>
       )}
+
+      {openEvent && <EventClipModal event={openEvent} onClose={() => setOpenEvent(null)} />}
     </section>
   );
 }

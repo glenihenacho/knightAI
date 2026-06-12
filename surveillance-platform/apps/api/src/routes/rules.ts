@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { CreateRuleRequestSchema, UpdateRuleRequestSchema } from "@surveillance/shared";
 import type { Store } from "../db/store.js";
 import { requireOperator } from "../auth.js";
+import { notifyConfigChanged } from "../detection.js";
 
 export function registerRuleRoutes(app: FastifyInstance, store: Store): void {
   // A rule may only reference a zone whose camera's connector lives at the
@@ -67,6 +68,7 @@ export function registerRuleRoutes(app: FastifyInstance, store: Store): void {
       action: body.action,
       enabled: body.enabled,
     });
+    notifyConfigChanged(store, req.log);
     return reply.code(201).send({ rule });
   });
 
@@ -84,6 +86,7 @@ export function registerRuleRoutes(app: FastifyInstance, store: Store): void {
     if (!ok) return;
     const rule = await store.updateRule(id, user.organizationId, body);
     if (!rule) return reply.code(404).send({ error: "rule not found" });
+    notifyConfigChanged(store, req.log);
     return { rule };
   });
 
@@ -93,6 +96,7 @@ export function registerRuleRoutes(app: FastifyInstance, store: Store): void {
     const { id } = req.params as { id: string };
     const deleted = await store.deleteRule(id, user.organizationId);
     if (!deleted) return reply.code(404).send({ error: "rule not found" });
+    notifyConfigChanged(store, req.log);
     return reply.code(204).send();
   });
 }

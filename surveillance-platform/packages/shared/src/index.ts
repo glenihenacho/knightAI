@@ -11,3 +11,4 @@ export * from "./zone.js";
 export * from "./schedule.js";
 export * from "./rule.js";
 export * from "./event.js";
+export * from "./detection.js";

@@ -10,6 +10,7 @@ const TABS = [
   { href: "zones", label: "Zones" },
   { href: "schedules", label: "Schedules" },
   { href: "rules", label: "Rules" },
+  { href: "events", label: "Events" },
 ] as const;
 
 export default async function SiteLayout({

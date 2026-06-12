@@ -26,6 +26,19 @@ const EnvSchema = z.object({
   // How long signed snapshot URLs remain valid.
   SNAPSHOT_URL_TTL_SECONDS: z.coerce.number().int().positive().default(300),
 
+  // Server-side detection. Segment-ready NOTIFYs are routed to
+  // segment_ready_shard_{cameraId hash mod WORKER_SHARDS}; Phase 2 runs one
+  // worker on shard 0, so adding workers is config-only.
+  WORKER_SHARDS: z.coerce.number().int().positive().default(1),
+  // The supervisor that starts/stops headless detection previews. Disable in
+  // tests that drive previews manually.
+  DETECTION_SUPERVISOR_ENABLED: z
+    .string()
+    .default("true")
+    .transform((v) => v === "true" || v === "1"),
+  // Reconcile interval. Only tests should need to change this.
+  DETECTION_TICK_MS: z.coerce.number().int().positive().default(10_000),
+
   // If set, run pending migrations on server boot. Useful in dev; in prod we
   // run migrate as a release step instead.
   MIGRATE_ON_BOOT: z

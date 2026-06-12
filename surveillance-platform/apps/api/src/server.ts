@@ -22,6 +22,7 @@ import { registerZoneRoutes } from "./routes/zones.js";
 import { registerScheduleRoutes } from "./routes/schedules.js";
 import { registerRuleRoutes } from "./routes/rules.js";
 import { registerEventRoutes } from "./routes/events.js";
+import { startDetectionSupervisor } from "./detection.js";
 import { ZodError } from "zod";
 
 async function main() {
@@ -100,13 +101,17 @@ async function main() {
   registerZoneRoutes(app, store);
   registerScheduleRoutes(app, store);
   registerRuleRoutes(app, store);
-  registerEventRoutes(app, store);
+  registerEventRoutes(app, store, storage);
   registerPairingRoutes(app, store, env);
   registerConnectorRoutes(app, store);
   registerCameraRoutes(app, store);
   registerCommandRoutes(app, store);
   registerUploadRoutes(app, store, storage);
   registerPreviewRoutes(app, store, storage, env);
+
+  const stopSupervisor = env.DETECTION_SUPERVISOR_ENABLED
+    ? startDetectionSupervisor(store, app.log, env.DETECTION_TICK_MS)
+    : () => {};
 
   await app.listen({ port: env.PORT, host: "0.0.0.0" });
   app.log.info(`api listening on :${env.PORT}`);
@@ -116,6 +121,7 @@ async function main() {
   const shutdown = async (signal: string) => {
     app.log.info({ signal }, "shutting down");
     try {
+      stopSupervisor();
       await app.close();
       process.exit(0);
     } catch (err) {

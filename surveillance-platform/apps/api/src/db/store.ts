@@ -12,6 +12,7 @@ import type {
   PolygonPoint,
   Preview,
   PreviewStatus,
+  PreviewStartedBy,
   Rule,
   Schedule,
   ScheduleWindow,
@@ -145,6 +146,16 @@ export interface ListEventsFilter {
   limit: number;
 }
 
+export interface DetectionTarget {
+  cameraId: string;
+  rtspUrl: string;
+  connectorId: string;
+}
+
+export interface DetectionPreview extends Preview {
+  connectorId: string;
+}
+
 export interface Store {
   createOrganization(name: string): Promise<{ id: string; name: string }>;
   getOrganization(id: string): Promise<{ id: string; name: string } | null>;
@@ -201,6 +212,14 @@ export interface Store {
     events: IngestEventInput[],
   ): Promise<{ accepted: number }>;
   listEventsForOrg(organizationId: string, filter: ListEventsFilter): Promise<Event[]>;
+  getEventForOrg(eventId: string, organizationId: string): Promise<Event | null>;
+  // Clip playback lookup. Public-by-event-id routes (playlist / segments /
+  // detections) use this — no org check, the random uuid is the credential,
+  // same posture as preview manifests. Null when the event predates
+  // server-side detection (no segment_key).
+  getEventClipRef(
+    eventId: string,
+  ): Promise<{ segmentKey: string; zonePolygon: PolygonPoint[] | null } | null>;
   // Everything the connector's behavior engine needs, scoped to the cameras
   // it owns: enabled rules + their zones, site schedules, site timezone.
   getAnalysisConfigForConnector(connectorId: string): Promise<AnalysisConfig>;
@@ -241,6 +260,7 @@ export interface Store {
   createPreview(input: {
     cameraId: string;
     maxDurationSeconds: number;
+    startedBy?: PreviewStartedBy;
   }): Promise<Preview>;
   getActivePreviewForCamera(cameraId: string): Promise<Preview | null>;
   getPreviewById(id: string): Promise<Preview | null>;
@@ -250,6 +270,18 @@ export interface Store {
   setPreviewStatus(id: string, status: PreviewStatus, errorMessage?: string): Promise<void>;
   endPreview(id: string, errorMessage?: string): Promise<void>;
   recordPreviewHeartbeat(id: string): Promise<boolean>;
+
+  // Server-side detection (Phase 2 pivot).
+  // pg_notify wrapper — segment_ready wake-ups for the worker and
+  // config_changed cache invalidation both go through here.
+  notify(channel: string, payload: string): Promise<void>;
+  // Cameras that should have a detection pipeline running: online camera on
+  // an online connector with at least one enabled rule over one of its zones.
+  listDetectionTargets(): Promise<DetectionTarget[]>;
+  // For detection previews, last_heartbeat_at means "last segment upload" —
+  // the HLS PUT handler bumps it, and the supervisor reads staleness as a
+  // dead pipeline.
+  listActiveDetectionPreviews(): Promise<DetectionPreview[]>;
 
   // Operator auth (dashboard).
   findUserByEmail(email: string): Promise<User | null>;
@@ -362,6 +394,7 @@ interface PreviewRow {
   id: string;
   camera_id: string;
   status: PreviewStatus;
+  started_by: PreviewStartedBy;
   max_duration_seconds: number;
   started_at: Date;
   last_heartbeat_at: Date;
@@ -374,6 +407,7 @@ function rowToPreview(row: PreviewRow): Preview {
     id: row.id,
     cameraId: row.camera_id,
     status: row.status,
+    startedBy: row.started_by,
     maxDurationSeconds: row.max_duration_seconds,
     startedAt: row.started_at.toISOString(),
     lastHeartbeatAt: row.last_heartbeat_at.toISOString(),
@@ -519,6 +553,8 @@ interface EventRow {
   occurred_at: Date;
   snapshot_key: string | null;
   metadata: Record<string, unknown>;
+  preview_id: string | null;
+  segment_key: string | null;
 }
 
 function rowToEvent(row: EventRow): Event {
@@ -536,6 +572,7 @@ function rowToEvent(row: EventRow): Event {
     occurredAt: row.occurred_at.toISOString(),
     snapshotKey: row.snapshot_key,
     metadata: row.metadata,
+    segmentKey: row.segment_key,
   };
 }
 
@@ -967,7 +1004,7 @@ export function createStore(databaseUrl: string): Store {
       const { rows } = await pool.query<EventRow>(
         `SELECT id, site_id, rule_id, rule_label, camera_id, camera_label,
                 zone_id, zone_label, trigger_type, severity, occurred_at,
-                snapshot_key, metadata
+                snapshot_key, metadata, preview_id, segment_key
            FROM events
           WHERE ${conds.join(" AND ")}
           ORDER BY occurred_at DESC
@@ -975,6 +1012,36 @@ export function createStore(databaseUrl: string): Store {
         params,
       );
       return rows.map(rowToEvent);
+    },
+
+    async getEventForOrg(eventId, organizationId) {
+      const { rows } = await pool.query<EventRow>(
+        `SELECT id, site_id, rule_id, rule_label, camera_id, camera_label,
+                zone_id, zone_label, trigger_type, severity, occurred_at,
+                snapshot_key, metadata, preview_id, segment_key
+           FROM events
+          WHERE id = $1 AND organization_id = $2`,
+        [eventId, organizationId],
+      );
+      return rows[0] ? rowToEvent(rows[0]) : null;
+    },
+
+    async getEventClipRef(eventId) {
+      const { rows } = await pool.query<{
+        segment_key: string | null;
+        zone_id: string | null;
+      }>(`SELECT segment_key, zone_id FROM events WHERE id = $1`, [eventId]);
+      const row = rows[0];
+      if (!row?.segment_key) return null;
+      let polygon: PolygonPoint[] | null = null;
+      if (row.zone_id) {
+        const zone = await pool.query<{ polygon: PolygonPoint[] }>(
+          `SELECT polygon FROM zones WHERE id = $1`,
+          [row.zone_id],
+        );
+        polygon = zone.rows[0]?.polygon ?? null;
+      }
+      return { segmentKey: row.segment_key, zonePolygon: polygon };
     },
 
     async getAnalysisConfigForConnector(connectorId) {
@@ -1277,20 +1344,20 @@ export function createStore(databaseUrl: string): Store {
       });
     },
 
-    async createPreview({ cameraId, maxDurationSeconds }) {
+    async createPreview({ cameraId, maxDurationSeconds, startedBy = "operator" }) {
       const { rows } = await pool.query<PreviewRow>(
-        `INSERT INTO previews (camera_id, max_duration_seconds)
-         VALUES ($1, $2)
-         RETURNING id, camera_id, status, max_duration_seconds,
+        `INSERT INTO previews (camera_id, max_duration_seconds, started_by)
+         VALUES ($1, $2, $3)
+         RETURNING id, camera_id, status, started_by, max_duration_seconds,
                    started_at, last_heartbeat_at, ended_at, error_message`,
-        [cameraId, maxDurationSeconds],
+        [cameraId, maxDurationSeconds, startedBy],
       );
       return rowToPreview(rows[0]!);
     },
 
     async getActivePreviewForCamera(cameraId) {
       const { rows } = await pool.query<PreviewRow>(
-        `SELECT id, camera_id, status, max_duration_seconds,
+        `SELECT id, camera_id, status, started_by, max_duration_seconds,
                 started_at, last_heartbeat_at, ended_at, error_message
            FROM previews
           WHERE camera_id = $1 AND ended_at IS NULL
@@ -1302,7 +1369,7 @@ export function createStore(databaseUrl: string): Store {
 
     async getPreviewById(id) {
       const { rows } = await pool.query<PreviewRow>(
-        `SELECT id, camera_id, status, max_duration_seconds,
+        `SELECT id, camera_id, status, started_by, max_duration_seconds,
                 started_at, last_heartbeat_at, ended_at, error_message
            FROM previews WHERE id = $1`,
         [id],
@@ -1312,7 +1379,7 @@ export function createStore(databaseUrl: string): Store {
 
     async getPreviewForConnector(previewId, connectorId) {
       const { rows } = await pool.query<PreviewRow>(
-        `SELECT p.id, p.camera_id, p.status, p.max_duration_seconds,
+        `SELECT p.id, p.camera_id, p.status, p.started_by, p.max_duration_seconds,
                 p.started_at, p.last_heartbeat_at, p.ended_at, p.error_message
            FROM previews p
            JOIN cameras c ON c.id = p.camera_id
@@ -1351,6 +1418,44 @@ export function createStore(databaseUrl: string): Store {
         [id],
       );
       return (rowCount ?? 0) > 0;
+    },
+
+    async notify(channel, payload) {
+      await pool.query(`SELECT pg_notify($1, $2)`, [channel, payload]);
+    },
+
+    async listDetectionTargets() {
+      const { rows } = await pool.query<{
+        id: string;
+        rtsp_url: string;
+        connector_id: string;
+      }>(
+        `SELECT DISTINCT cam.id, cam.rtsp_url, cam.connector_id
+           FROM cameras cam
+           JOIN connectors c ON c.id = cam.connector_id
+           JOIN zones z ON z.camera_id = cam.id
+           JOIN rules r ON r.zone_id = z.id
+          WHERE r.enabled
+            AND cam.state = 'online'
+            AND c.status = 'online'`,
+      );
+      return rows.map((r) => ({
+        cameraId: r.id,
+        rtspUrl: r.rtsp_url,
+        connectorId: r.connector_id,
+      }));
+    },
+
+    async listActiveDetectionPreviews() {
+      const { rows } = await pool.query<PreviewRow & { connector_id: string }>(
+        `SELECT p.id, p.camera_id, p.status, p.started_by, p.max_duration_seconds,
+                p.started_at, p.last_heartbeat_at, p.ended_at, p.error_message,
+                c.connector_id
+           FROM previews p
+           JOIN cameras c ON c.id = p.camera_id
+          WHERE p.started_by = 'detection' AND p.ended_at IS NULL`,
+      );
+      return rows.map((r) => ({ ...rowToPreview(r), connectorId: r.connector_id }));
     },
 
     async findUserByEmail(email) {

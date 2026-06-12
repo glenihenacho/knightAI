@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import {
   GetObjectCommand,
+  HeadObjectCommand,
   PutObjectCommand,
   S3Client,
   type GetObjectCommandOutput,
@@ -19,6 +20,7 @@ export interface ObjectStorage {
   getSignedReadUrl(key: string, ttlSeconds?: number): Promise<string>;
   getObjectText(key: string): Promise<string | null>;
   getObjectStream(key: string): Promise<StoredObject | null>;
+  objectExists(key: string): Promise<boolean>;
 }
 
 export function createObjectStorage(env: Env): ObjectStorage {
@@ -76,6 +78,19 @@ export function createObjectStorage(env: Env): ObjectStorage {
         contentType: obj.ContentType,
         contentLength: obj.ContentLength,
       };
+    },
+
+    async objectExists(key) {
+      try {
+        await client.send(new HeadObjectCommand({ Bucket: env.S3_BUCKET, Key: key }));
+        return true;
+      } catch (err) {
+        const name = (err as { name?: string }).name;
+        const status = (err as { $metadata?: { httpStatusCode?: number } }).$metadata
+          ?.httpStatusCode;
+        if (name === "NotFound" || name === "NoSuchKey" || status === 404) return false;
+        throw err;
+      }
     },
   };
 }

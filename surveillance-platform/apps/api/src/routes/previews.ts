@@ -1,11 +1,15 @@
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import {
+  segmentReadyChannel,
+  shardForCamera,
   type Command,
   type PreviewSessionResponse,
+  type SegmentReady,
   type StartPreviewPayloadSchema,
   type StopPreviewPayloadSchema,
 } from "@surveillance/shared";
+import { SEGMENT_SECONDS } from "../detection.js";
 import type { z } from "zod";
 import type { Store } from "../db/store.js";
 import type { Env } from "../env.js";
@@ -113,6 +117,9 @@ export function registerPreviewRoutes(
 
     const active = await store.getActivePreviewForCamera(cameraId);
     if (!active) return reply.code(204).send();
+    // Detection previews belong to the supervisor; an operator closing their
+    // viewer must not tear down the camera's detection pipeline.
+    if (active.startedBy === "detection") return reply.code(204).send();
 
     await store.endPreview(active.id);
     const payload: StopPayload = { cameraId, previewId: active.id };
@@ -209,6 +216,29 @@ export function registerPreviewRoutes(
     // segments rotate.
     if (isManifest && preview.status === "starting") {
       await store.setPreviewStatus(preview.id, "active");
+    }
+
+    if (!isManifest) {
+      // Wake the detection worker. Best-effort: a lost NOTIFY only delays
+      // detection until the next segment two seconds later.
+      const payload: SegmentReady = {
+        previewId: preview.id,
+        cameraId: preview.cameraId,
+        filename,
+        segmentSeconds: SEGMENT_SECONDS,
+        uploadedAt: new Date().toISOString(),
+      };
+      const shard = shardForCamera(preview.cameraId, env.WORKER_SHARDS);
+      try {
+        await store.notify(segmentReadyChannel(shard), JSON.stringify(payload));
+      } catch (err) {
+        req.log.warn({ err, previewId: preview.id }, "segment_ready notify failed");
+      }
+      // For detection previews last_heartbeat_at doubles as "segments are
+      // flowing" — the supervisor recycles sessions whose uploads stall.
+      if (preview.startedBy === "detection") {
+        await store.recordPreviewHeartbeat(preview.id);
+      }
     }
     return reply.code(204).send();
   });

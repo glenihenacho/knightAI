@@ -29,6 +29,17 @@ enum Command {
         id: String,
         payload: StopPreviewPayload,
     },
+    // Headless preview: same FFmpeg -> HLS -> upload pipeline, but the API
+    // owns the lifecycle (no operator watching). Detection itself runs in the
+    // server-side worker; the connector just keeps segments flowing.
+    StartDetection {
+        id: String,
+        payload: StartPreviewPayload,
+    },
+    StopDetection {
+        id: String,
+        payload: StopPreviewPayload,
+    },
 }
 
 #[derive(Deserialize)]
@@ -168,7 +179,7 @@ async fn handle_command(
             start_preview: None,
             error_message: None,
         },
-        Command::StartPreview { id, payload } => match manager.start(identity, &payload).await {
+        Command::StartPreview { id, payload } | Command::StartDetection { id, payload } => match manager.start(identity, &payload).await {
             Ok(result) => CommandOutcome {
                 id,
                 status: "ok",
@@ -184,7 +195,7 @@ async fn handle_command(
                 error_message: Some(e.to_string()),
             },
         },
-        Command::StopPreview { id, payload } => {
+        Command::StopPreview { id, payload } | Command::StopDetection { id, payload } => {
             let _ = manager.stop(&payload.preview_id).await;
             CommandOutcome {
                 id,

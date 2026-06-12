@@ -11,10 +11,17 @@
  * the token from the log line.
  */
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
 import { Client } from "pg";
+
+const execFileAsync = promisify(execFile);
 
 const API_PORT = 14099;
 const S3_PORT = 19000;
@@ -109,6 +116,20 @@ function startS3Stub(): Promise<S3Stub> {
         res.end();
         return;
       }
+      if (req.method === "HEAD") {
+        const obj = stub.objects.get(key);
+        if (!obj) {
+          res.writeHead(404);
+          res.end();
+          return;
+        }
+        res.writeHead(200, {
+          "content-type": obj.contentType,
+          "content-length": String(obj.body.length),
+        });
+        res.end();
+        return;
+      }
       if (req.method === "GET") {
         const obj = stub.objects.get(key);
         if (!obj) {
@@ -136,7 +157,10 @@ interface ApiHandle {
   stdoutBuffer: string[];
 }
 
-async function startApi(): Promise<ApiHandle> {
+async function startApi(
+  opts: { port?: number; supervisor?: boolean } = {},
+): Promise<ApiHandle> {
+  const port = opts.port ?? API_PORT;
   const tsxBin = new URL("../node_modules/.bin/tsx", import.meta.url).pathname;
   const serverEntry = new URL("../src/server.ts", import.meta.url).pathname;
   const buffer: string[] = [];
@@ -144,9 +168,11 @@ async function startApi(): Promise<ApiHandle> {
     env: {
       ...process.env,
       NODE_ENV: "test",
-      PORT: String(API_PORT),
+      PORT: String(port),
+      DETECTION_SUPERVISOR_ENABLED: opts.supervisor ? "true" : "false",
+      DETECTION_TICK_MS: "1000",
       DATABASE_URL,
-      PUBLIC_BASE_URL: `http://127.0.0.1:${API_PORT}`,
+      PUBLIC_BASE_URL: `http://127.0.0.1:${port}`,
       DASHBOARD_BASE_URL,
       MIGRATE_ON_BOOT: "true",
       SEED_ORGANIZATION_NAME: SEED_ORG_NAME,
@@ -179,7 +205,7 @@ async function startApi(): Promise<ApiHandle> {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     try {
-      const r = await fetch(`http://127.0.0.1:${API_PORT}/healthz`);
+      const r = await fetch(`http://127.0.0.1:${port}/healthz`);
       if (r.ok) break;
     } catch {
       // keep waiting
@@ -194,6 +220,99 @@ async function startApi(): Promise<ApiHandle> {
         child.kill("SIGTERM");
       }),
   };
+}
+
+const WORKER_METRICS_PORT = 19101;
+const TESTDATA_DIR = new URL(
+  "../../connector-tauri/src-tauri/analysis/testdata",
+  import.meta.url,
+).pathname;
+
+/**
+ * Spawn the detection worker against the same Postgres + S3 stub. Uses the
+ * analysis crate's local YOLOX testdata (fetch with
+ * `node scripts/fetch-model.mjs --testdata` from apps/connector-tauri).
+ */
+async function startWorker(): Promise<ApiHandle> {
+  const tsxBin = new URL("../node_modules/.bin/tsx", import.meta.url).pathname;
+  const entry = new URL("../../worker/src/main.ts", import.meta.url).pathname;
+  const buffer: string[] = [];
+  const child = spawn(tsxBin, [entry], {
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      DATABASE_URL,
+      S3_ENDPOINT: `http://127.0.0.1:${S3_PORT}`,
+      S3_REGION: "us-east-1",
+      S3_BUCKET: "surveillance",
+      S3_ACCESS_KEY_ID: "test",
+      S3_SECRET_ACCESS_KEY: "test",
+      S3_FORCE_PATH_STYLE: "true",
+      WORKER_SHARD: "0",
+      MODEL_LOCAL_PATH: join(TESTDATA_DIR, "yolox_nano.onnx"),
+      METRICS_PORT: String(WORKER_METRICS_PORT),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout.on("data", (b) => {
+    buffer.push(String(b));
+    process.stderr.write(`[worker] ${String(b)}`);
+  });
+  child.stderr.on("data", (b) => {
+    buffer.push(String(b));
+    process.stderr.write(`[worker!] ${String(b)}`);
+  });
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${WORKER_METRICS_PORT}/healthz`);
+      if (r.ok) break;
+    } catch {
+      // keep waiting
+    }
+    await sleep(200);
+  }
+  return {
+    stdoutBuffer: buffer,
+    stop: () =>
+      new Promise((resolve) => {
+        child.once("exit", () => resolve());
+        child.kill("SIGTERM");
+      }),
+  };
+}
+
+/**
+ * A 2s MPEG-TS segment of the testdata bus-stop photo (real people), so the
+ * worker's real YOLOX model produces real detections end-to-end.
+ */
+async function buildPersonSegment(): Promise<Buffer> {
+  const out = join(tmpdir(), `smoke-person-${Date.now()}.ts`);
+  try {
+    await execFileAsync("ffmpeg", [
+      "-y",
+      "-loglevel",
+      "error",
+      "-loop",
+      "1",
+      "-i",
+      join(TESTDATA_DIR, "person.jpg"),
+      "-t",
+      "2",
+      "-r",
+      "25",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-f",
+      "mpegts",
+      out,
+    ]);
+    return await readFile(out);
+  } finally {
+    await rm(out, { force: true });
+  }
 }
 
 function extractMagicLink(buffer: string[]): string | null {
@@ -1283,6 +1402,298 @@ async function main() {
         afterDel.events[0].ruleLabel === "Presence after hours",
       afterDel.events[0],
     );
+
+    // ===== Phase 2 pivot: server-side detection (supervisor + worker) =====
+    if (!existsSync(join(TESTDATA_DIR, "yolox_nano.onnx"))) {
+      check(
+        "worker pipeline SKIPPED — fetch model first: cd apps/connector-tauri && node scripts/fetch-model.mjs --testdata",
+        false,
+      );
+    } else {
+      const worker = await startWorker();
+      // Second API instance with the supervisor on a 1s tick. The primary
+      // instance runs with the supervisor off so its reconciler can't
+      // interleave commands into the queues the checks above drain.
+      const api2 = await startApi({ port: 14098, supervisor: true });
+      try {
+        const sitesNowRes = await fetch(`${API}/v1/sites`, { headers: { cookie: cookieHeader } });
+        const sitesNow = (await sitesNowRes.json()).sites as Array<{ id: string; label: string }>;
+        const defaultSite = sitesNow.find((x) => x.label === "Default site")!;
+
+        // Arm detection: full-frame zone + enabled presence rule on the
+        // already-online camera.
+        const dZoneRes = await fetch(`${API}/v1/cameras/${camera.id}/zones`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: cookieHeader },
+          body: JSON.stringify({
+            label: "Whole frame",
+            polygon: [
+              { x: 0.01, y: 0.01 },
+              { x: 0.99, y: 0.01 },
+              { x: 0.99, y: 0.99 },
+              { x: 0.01, y: 0.99 },
+            ],
+          }),
+        });
+        check("detection zone created 201", dZoneRes.status === 201);
+        const dZone = (await dZoneRes.json()).zone;
+        const dRuleRes = await fetch(`${API}/v1/sites/${defaultSite.id}/rules`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: cookieHeader },
+          body: JSON.stringify({
+            label: "Anyone in frame",
+            zoneId: dZone.id,
+            trigger: { type: "presence_in_zone", params: {} },
+            action: { type: "raise_event", severity: "high" },
+            enabled: true,
+          }),
+        });
+        check("detection rule created 201", dRuleRes.status === 201);
+        const dRule = (await dRuleRes.json()).rule;
+
+        // The supervisor should converge: a start_detection command for this
+        // camera lands in the connector's queue within a few ticks.
+        let detectCmd: { id: string; kind: string; payload: Record<string, unknown> } | null = null;
+        {
+          const deadline = Date.now() + 20_000;
+          while (Date.now() < deadline && !detectCmd) {
+            const res = await fetch(`${API}/v1/connectors/commands/next`, { headers: auth });
+            if (res.status === 200) {
+              const c = await res.json();
+              await fetch(`${API}/v1/connectors/commands/${c.id}/result`, {
+                method: "POST",
+                headers: { ...auth, "content-type": "application/json" },
+                body: JSON.stringify({
+                  commandId: c.id,
+                  status: "ok",
+                  durationMs: 5,
+                  finishedAt: new Date().toISOString(),
+                  startPreview:
+                    c.kind === "start_detection" || c.kind === "start_preview"
+                      ? { startedAt: new Date().toISOString() }
+                      : undefined,
+                }),
+              });
+              if (c.kind === "start_detection" && c.payload.cameraId === camera.id) {
+                detectCmd = c;
+              }
+            } else {
+              await sleep(300);
+            }
+          }
+        }
+        check("supervisor issued start_detection for the armed camera", detectCmd !== null);
+        const dPreviewId = String(detectCmd?.payload.previewId ?? "");
+        check(
+          "start_detection payload carries the full preview tuning",
+          typeof detectCmd?.payload.rtspUrl === "string" &&
+            typeof detectCmd?.payload.maxDurationSeconds === "number" &&
+            typeof detectCmd?.payload.segmentSeconds === "number",
+        );
+
+        const sqlD = new Client({ connectionString: DATABASE_URL });
+        await sqlD.connect();
+        const dPrevRow = await sqlD.query<{ started_by: string }>(
+          "SELECT started_by FROM previews WHERE id = $1",
+          [dPreviewId],
+        );
+        await sqlD.end();
+        check(
+          "detection preview row has started_by='detection'",
+          dPrevRow.rows[0]?.started_by === "detection",
+        );
+
+        // Act as the connector: upload a manifest and a real 2s segment of
+        // the bus-stop photo. The PUT NOTIFYs the worker, which runs the real
+        // YOLOX model and should raise a presence event.
+        const personSeg = await buildPersonSegment();
+        await fetch(`${API}/v1/connectors/hls/${dPreviewId}/playlist.m3u8`, {
+          method: "PUT",
+          headers: { ...auth, "content-type": "application/vnd.apple.mpegurl" },
+          body: "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg-0001.ts\n",
+        });
+        const dSegRes = await fetch(`${API}/v1/connectors/hls/${dPreviewId}/seg-0001.ts`, {
+          method: "PUT",
+          headers: { ...auth, "content-type": "video/mp2t" },
+          body: personSeg,
+        });
+        check("detection segment uploaded 204", dSegRes.status === 204);
+
+        const listRuleEvents = async () => {
+          const res = await fetch(`${API}/v1/events?siteId=${defaultSite.id}&limit=200`, {
+            headers: { cookie: cookieHeader },
+          });
+          const body = await res.json();
+          return (body.events as Array<Record<string, unknown>>).filter(
+            (ev) => ev.ruleId === dRule.id,
+          );
+        };
+
+        let ruleEvents: Array<Record<string, unknown>> = [];
+        {
+          const deadline = Date.now() + 30_000;
+          while (Date.now() < deadline) {
+            ruleEvents = await listRuleEvents();
+            if (ruleEvents.length > 0) break;
+            await sleep(500);
+          }
+        }
+        // The fixture photo has several people; each tracked person fires
+        // presence once. Let processing settle, then take the stable count.
+        await sleep(2500);
+        ruleEvents = await listRuleEvents();
+        const stableCount = ruleEvents.length;
+        check("worker raised presence event(s) from real inference", stableCount >= 1, {
+          count: stableCount,
+        });
+        const dEvent = ruleEvents[0];
+        if (dEvent) {
+          check("event trigger/severity denormalized", dEvent.triggerType === "presence_in_zone" && dEvent.severity === "high");
+          check(
+            "event carries the segment key",
+            dEvent.segmentKey === `hls/${camera.id}/${dPreviewId}/seg-0001.ts`,
+            dEvent.segmentKey,
+          );
+          check("event has a trigger-frame thumbnail", typeof dEvent.snapshotKey === "string");
+          check(
+            "thumbnail object landed in the snapshots keyspace",
+            s3.objects.has(`/surveillance/snapshots/${dEvent.snapshotKey}.jpg`),
+          );
+          const meta = dEvent.metadata as Record<string, unknown>;
+          check(
+            "event metadata has trackId + bbox",
+            typeof meta.trackId === "number" && Array.isArray(meta.bbox),
+          );
+        }
+        check(
+          "worker wrote the detections sidecar next to the segment",
+          s3.objects.has(`/surveillance/hls/${camera.id}/${dPreviewId}/seg-0001.json`),
+        );
+
+        // NOTIFY redelivery must not duplicate events. A redelivered notify
+        // carries the IDENTICAL payload (same uploadedAt -> same frame
+        // timestamps), so the tracker matches its own tracks and the
+        // dedup_key index backstops the engine. Send the same payload twice.
+        const redeliveryPayload = JSON.stringify({
+          previewId: dPreviewId,
+          cameraId: camera.id,
+          filename: "seg-0001.ts",
+          segmentSeconds: 2,
+          uploadedAt: new Date().toISOString(),
+        });
+        const sqlN = new Client({ connectionString: DATABASE_URL });
+        await sqlN.connect();
+        await sqlN.query("SELECT pg_notify('segment_ready_shard_0', $1)", [redeliveryPayload]);
+        // First delivery is later footage (tracks expired since the original
+        // segment), so fresh entries fire — wait for that to settle.
+        let afterFirst = stableCount;
+        {
+          const deadline = Date.now() + 20_000;
+          while (Date.now() < deadline) {
+            const n = (await listRuleEvents()).length;
+            if (n > stableCount) {
+              afterFirst = n;
+              break;
+            }
+            await sleep(500);
+          }
+        }
+        await sleep(2000);
+        afterFirst = (await listRuleEvents()).length;
+        await sqlN.query("SELECT pg_notify('segment_ready_shard_0', $1)", [redeliveryPayload]);
+        await sleep(4000);
+        await sqlN.end();
+        check(
+          "redelivered notify (identical payload) raises no duplicate events",
+          (await listRuleEvents()).length === afterFirst,
+          { afterFirst, afterRedelivery: (await listRuleEvents()).length },
+        );
+
+        // Clip endpoints.
+        if (dEvent) {
+          const evDetailRes = await fetch(`${API}/v1/events/${dEvent.id}`, {
+            headers: { cookie: cookieHeader },
+          });
+          check("GET /v1/events/:id 200", evDetailRes.status === 200);
+          const evDetail = await evDetailRes.json();
+          check("event detail includes zone polygon", Array.isArray(evDetail.zonePolygon));
+
+          const playlistRes = await fetch(`${API}/v1/events/${dEvent.id}/playlist.m3u8`);
+          check("event playlist 200", playlistRes.status === 200);
+          const playlist = await playlistRes.text();
+          check(
+            "playlist references the trigger segment via the event seg proxy",
+            playlist.includes(`/v1/events/${dEvent.id}/seg/seg-0001.ts`) &&
+              playlist.includes("#EXT-X-ENDLIST"),
+          );
+
+          const evSegRes = await fetch(`${API}/v1/events/${dEvent.id}/seg/seg-0001.ts`);
+          check("event segment proxy 200", evSegRes.status === 200);
+          check(
+            "event segment proxy rejects out-of-clip filenames",
+            (await fetch(`${API}/v1/events/${dEvent.id}/seg/seg-9999.ts`)).status === 404,
+          );
+
+          const detRes = await fetch(`${API}/v1/events/${dEvent.id}/detections`);
+          check("event detections 200", detRes.status === 200);
+          const det = await detRes.json();
+          check(
+            "detections payload has frames with boxes",
+            Array.isArray(det.frames) &&
+              det.frames.length > 0 &&
+              det.frames.some((f: { detections: unknown[] }) => f.detections.length > 0),
+          );
+        }
+
+        // Disabling the LAST enabled rule on the camera must make the
+        // supervisor tear the detection preview down. Earlier sections left
+        // other enabled rules at this site, so disable them all.
+        const allRulesRes = await fetch(`${API}/v1/sites/${defaultSite.id}/rules`, {
+          headers: { cookie: cookieHeader },
+        });
+        const allRules = (await allRulesRes.json()).rules as Array<{
+          id: string;
+          enabled: boolean;
+        }>;
+        for (const r of allRules.filter((r) => r.enabled)) {
+          const res = await fetch(`${API}/v1/rules/${r.id}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json", cookie: cookieHeader },
+            body: JSON.stringify({ enabled: false }),
+          });
+          check(`rule ${r.id.slice(0, 8)} disabled 200`, res.status === 200);
+        }
+        let stopCmdSeen = false;
+        {
+          const deadline = Date.now() + 20_000;
+          while (Date.now() < deadline && !stopCmdSeen) {
+            const res = await fetch(`${API}/v1/connectors/commands/next`, { headers: auth });
+            if (res.status === 200) {
+              const c = await res.json();
+              await fetch(`${API}/v1/connectors/commands/${c.id}/result`, {
+                method: "POST",
+                headers: { ...auth, "content-type": "application/json" },
+                body: JSON.stringify({
+                  commandId: c.id,
+                  status: "ok",
+                  durationMs: 5,
+                  finishedAt: new Date().toISOString(),
+                }),
+              });
+              if (c.kind === "stop_detection" && c.payload.previewId === dPreviewId) {
+                stopCmdSeen = true;
+              }
+            } else {
+              await sleep(300);
+            }
+          }
+        }
+        check("supervisor issued stop_detection after last rule disabled", stopCmdSeen);
+      } finally {
+        await api2.stop();
+        await worker.stop();
+      }
+    }
 
     // ===== Logout =====
     const logoutRes = await fetch(`${API}/v1/auth/logout`, {

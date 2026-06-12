@@ -206,6 +206,13 @@ export const api = {
     );
   },
 
+  getEvent: (id: string, opts: FetchOptions = {}) =>
+    call<{ event: EventRecord; zonePolygon: { x: number; y: number }[] | null }>(
+      `/v1/events/${encodeURIComponent(id)}`,
+      { method: "GET" },
+      opts,
+    ),
+
   listConnectors: (opts: FetchOptions = {}) =>
     call<{ connectors: Connector[] }>("/v1/connectors", { method: "GET" }, opts),
 
@@ -249,3 +256,10 @@ export const api = {
 };
 
 export const SNAPSHOT_URL = (key: string) => `${BASE}/v1/snapshots/${encodeURIComponent(key)}`;
+
+// Clip playback endpoints are public-by-event-id (same posture as preview
+// manifests), so hls.js can fetch them without credential plumbing.
+export const EVENT_PLAYLIST_URL = (id: string) =>
+  `${BASE}/v1/events/${encodeURIComponent(id)}/playlist.m3u8`;
+export const EVENT_DETECTIONS_URL = (id: string) =>
+  `${BASE}/v1/events/${encodeURIComponent(id)}/detections`;

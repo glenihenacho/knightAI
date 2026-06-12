@@ -40,6 +40,10 @@ export const EventSchema = z.object({
   occurredAt: z.string().datetime({ offset: true }),
   snapshotKey: z.string().nullable(),
   metadata: z.record(z.unknown()),
+  // S3 key of the HLS segment containing the trigger frame, set by the
+  // server-side detection worker. Null for connector-era events (pre-pivot)
+  // — those have no clip playback.
+  segmentKey: z.string().nullable(),
 });
 
 // Connector-facing snapshot of everything its behavior engine needs: cameras
