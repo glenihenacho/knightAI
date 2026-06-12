@@ -25,7 +25,13 @@ export default function MarketingLanding() {
             <a href="#integrations">Integrations</a>
             <Link href="/dashboard">Client</Link>
           </div>
-          <a className="gc-btn gc-primary" href="#demo" data-pointer-track="1">
+          <a
+            className="gc-btn gc-primary"
+            href={DEMO_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-pointer-track="1"
+          >
             Book a Private Demo <span className="gc-arrow">→</span>
           </a>
         </div>
@@ -63,7 +69,13 @@ export default function MarketingLanding() {
               </span>
             </div>
             <div className="gc-ctas">
-              <a className="gc-btn gc-primary" href="#demo" data-pointer-track="1">
+              <a
+                className="gc-btn gc-primary"
+                href={DEMO_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                data-pointer-track="1"
+              >
                 Book a Private Demo <span className="gc-arrow">→</span>
               </a>
               <a className="gc-btn" href="#product" data-pointer-track="1">
@@ -350,7 +362,9 @@ export default function MarketingLanding() {
             <div className="gc-protocols">
               <span>+</span> RTSP &nbsp; <span>+</span> ONVIF &nbsp; <span>+</span> Direct VMS
             </div>
-            <a href="#demo">Confirm your stack is supported →</a>
+            <a href={DEMO_URL} target="_blank" rel="noopener noreferrer">
+              Confirm your stack is supported →
+            </a>
           </div>
         </div>
       </section>
