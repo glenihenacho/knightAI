@@ -1,40 +1,61 @@
 # syntax=docker/dockerfile:1.7
-# API container for Fly.io. Build context is the workspace root so pnpm can
-# resolve workspace-protocol dependencies. Pair with .dockerignore at the
-# workspace root to keep the context small.
+# Combined API + detection-worker image for Fly.io. One image, two process
+# groups (see infra/deploy/fly.toml [processes]) — they share secrets and a
+# deploy, which is the right ops shape while Phase 2 runs a single worker
+# shard. Build context is the workspace root so pnpm can resolve
+# workspace-protocol dependencies; pair with .dockerignore at the root.
+#
+# Debian-slim, not alpine: onnxruntime-node ships glibc prebuilds only.
+# The YOLOX model is baked in (sha256-pinned) so the worker has no model
+# bootstrap dependency at runtime; MODEL_LOCAL_PATH points at it.
 
-FROM node:20-alpine AS base
+FROM node:20-slim AS base
 WORKDIR /repo
 RUN corepack enable
 
-# --- deps: install only what the api needs, with a frozen lockfile ---
+# --- deps: install what api + worker need, with a frozen lockfile ---
 FROM base AS deps
-COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json tsconfig.base.json ./
+# .npmrc carries onnxruntime-node-install-cuda=skip (CPU package only).
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json tsconfig.base.json .npmrc ./
 COPY apps/api/package.json apps/api/
+COPY apps/worker/package.json apps/worker/
 COPY packages/shared/package.json packages/shared/
 COPY packages/camera-core/package.json packages/camera-core/
-RUN pnpm install --frozen-lockfile --filter @surveillance/api...
+RUN pnpm install --frozen-lockfile --filter @surveillance/api... --filter @surveillance/worker...
 
-# --- build: compile TS to apps/api/dist ---
+# --- build: compile TS to dist ---
 FROM deps AS build
 COPY packages/shared packages/shared
 COPY packages/camera-core packages/camera-core
 COPY apps/api apps/api
+COPY apps/worker apps/worker
 COPY infra/database/migrations infra/database/migrations
 RUN pnpm --filter @surveillance/shared --filter @surveillance/camera-core build \
- && pnpm --filter @surveillance/api build
+ && pnpm --filter @surveillance/api build \
+ && pnpm --filter @surveillance/worker build
 
-# --- runtime: slim image with tini for proper signal forwarding ---
-FROM node:20-alpine AS runtime
-RUN apk add --no-cache tini && \
-    addgroup -S app && adduser -S -G app app
+# --- model: YOLOX-nano (Apache-2.0, Megvii), sha256-pinned ---
+FROM base AS model
+ADD https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.onnx /models/yolox_nano.onnx
+RUN echo "c789161ed43c8269fcd4e67c67eeeb4e80c622da2eb296a20bc6007bd18a0b7d  /models/yolox_nano.onnx" | sha256sum -c -
+
+# --- runtime: ffmpeg for the worker's frame extraction, tini for signals ---
+FROM node:20-slim AS runtime
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg tini \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd -r app && useradd -r -g app app
 WORKDIR /repo
 COPY --from=build --chown=app:app /repo /repo
-WORKDIR /repo/apps/api
+COPY --from=model --chown=app:app /models /repo/models
 ENV NODE_ENV=production \
     PORT=4000 \
-    MIGRATIONS_DIR=/repo/infra/database/migrations
+    MIGRATIONS_DIR=/repo/infra/database/migrations \
+    MODEL_LOCAL_PATH=/repo/models/yolox_nano.onnx
+WORKDIR /repo/apps/api
 USER app
 EXPOSE 4000
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
+# Default command is the API; the worker process group overrides it in
+# fly.toml [processes].
 CMD ["node", "dist/server.js"]

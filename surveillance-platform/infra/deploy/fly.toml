@@ -22,9 +22,20 @@ primary_region = "iad"
   release_command = "node dist/db/migrate.js"
   strategy = "rolling"
 
+[processes]
+  # Same image, two roles: the API serves HTTP; the worker chews HLS
+  # segments (Postgres LISTEN -> YOLOX -> events). Sharing the app means
+  # sharing secrets (DATABASE_URL, R2) — no second secret store to drift.
+  app = "node dist/server.js"
+  worker = "node /repo/apps/worker/dist/main.js"
+
 [env]
   NODE_ENV = "production"
   PORT = "4000"
+  # Worker (model is baked into the image at MODEL_LOCAL_PATH).
+  METRICS_PORT = "9100"
+  WORKER_SHARD = "0"
+  WORKER_SHARDS = "1"
   # release_command handles migrations; instances should not.
   MIGRATE_ON_BOOT = "false"
   # Cookies cross-subdomain only when Secure + Domain attribute are set.
@@ -52,3 +63,12 @@ primary_region = "iad"
 [[vm]]
   size = "shared-cpu-1x"
   memory = "512mb"
+  processes = ["app"]
+
+# Inference is the worker's whole cost profile; give it real headroom.
+# No [http_service]/[[services]] entry: nothing public, and machines without
+# services never auto-stop — detection must run while nobody watches.
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "1gb"
+  processes = ["worker"]
