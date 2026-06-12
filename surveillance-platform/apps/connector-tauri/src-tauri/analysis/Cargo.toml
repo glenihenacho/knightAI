@@ -1,0 +1,20 @@
+# Phase 2 Behavior Intelligence engine. Deliberately a standalone pure-Rust
+# crate (no Tauri/tokio/reqwest) so it compiles and unit-tests anywhere —
+# including CI runners and dev boxes without the Tauri system libraries.
+# The Tauri app wires it to ffmpeg frames and the events API.
+[package]
+name = "surveillance-analysis"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Pure-Rust ONNX inference: no onnxruntime native libraries to cross-compile
+# or bundle per-OS. Slow relative to ort, but ample for ~1 fps per camera.
+tract-onnx = "0.21"

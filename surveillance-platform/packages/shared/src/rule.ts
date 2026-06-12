@@ -1,11 +1,27 @@
 import { z } from "zod";
 
-// Phase 1 ships exactly one trigger. The discriminated-union shape is the
-// contract Phase 2 extends with 'dwell', 'reentry', 'path_deviation'.
+// Phase 2 Behavior Intelligence triggers. 'path_deviation' from the original
+// contract is deferred — it needs reference-path authoring in the dashboard
+// before the engine has anything to compare a track against.
 export const TriggerSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("presence_in_zone"),
     params: z.object({}).default({}),
+  }),
+  z.object({
+    type: z.literal("dwell"),
+    params: z.object({
+      // Continuous seconds a tracked person must remain inside the zone.
+      minDurationSeconds: z.number().int().min(5).max(3600),
+    }),
+  }),
+  z.object({
+    type: z.literal("reentry"),
+    params: z.object({
+      // Fires when a person re-enters the zone within this many seconds of
+      // having left it.
+      withinSeconds: z.number().int().min(10).max(86400),
+    }),
   }),
 ]);
 

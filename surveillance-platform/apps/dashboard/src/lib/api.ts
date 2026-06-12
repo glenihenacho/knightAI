@@ -8,11 +8,13 @@ import type {
   CreateScheduleRequest,
   CreateSiteRequest,
   CreateZoneRequest,
+  Event as EventRecord,
   Invite,
   MeResponse,
   PreviewSessionResponse,
   Rule,
   Schedule,
+  Severity,
   Site,
   UpdateRuleRequest,
   UpdateScheduleRequest,
@@ -186,6 +188,23 @@ export const api = {
 
   deleteRule: (id: string) =>
     call<void>(`/v1/rules/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  listEvents: (
+    params: { siteId?: string; severity?: Severity; before?: string; limit?: number } = {},
+    opts: FetchOptions = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (params.siteId) q.set("siteId", params.siteId);
+    if (params.severity) q.set("severity", params.severity);
+    if (params.before) q.set("before", params.before);
+    if (params.limit) q.set("limit", String(params.limit));
+    const qs = q.toString();
+    return call<{ events: EventRecord[] }>(
+      `/v1/events${qs ? `?${qs}` : ""}`,
+      { method: "GET" },
+      opts,
+    );
+  },
 
   listConnectors: (opts: FetchOptions = {}) =>
     call<{ connectors: Connector[] }>("/v1/connectors", { method: "GET" }, opts),

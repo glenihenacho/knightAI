@@ -65,6 +65,15 @@ export async function listSitesServer() {
   }
 }
 
+export async function listEventsServer(params: { siteId?: string; limit?: number } = {}) {
+  try {
+    return await api.listEvents(params, { cookie: cookieHeader() });
+  } catch (err) {
+    if (err instanceof UnauthorizedError) redirect("/login");
+    throw err;
+  }
+}
+
 /** Returns null on 404 so pages can render notFound(). */
 export async function getSiteServer(id: string) {
   try {

@@ -10,6 +10,7 @@
  * fallback transport. The test buffers the API child's stdout and extracts
  * the token from the log line.
  */
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -35,6 +36,7 @@ async function wipeDb() {
   const client = new Client({ connectionString: DATABASE_URL });
   await client.connect();
   await client.query(`
+    DROP TABLE IF EXISTS events CASCADE;
     DROP TABLE IF EXISTS rules CASCADE;
     DROP TABLE IF EXISTS schedules CASCADE;
     DROP TABLE IF EXISTS zones CASCADE;
@@ -53,6 +55,7 @@ async function wipeDb() {
     DROP TYPE IF EXISTS connector_status CASCADE;
     DROP TYPE IF EXISTS connector_platform CASCADE;
     DROP TYPE IF EXISTS camera_state CASCADE;
+    DROP TYPE IF EXISTS preview_status CASCADE;
     DROP TYPE IF EXISTS command_status CASCADE;
     DROP TYPE IF EXISTS command_kind CASCADE;
   `);
@@ -1070,6 +1073,216 @@ async function main() {
     });
     const rulesAfter = await rulesAfterZoneDel.json();
     check("deleting zone cascades rules", rulesAfter.rules.length === 0);
+
+    // ===== Phase 2 / M2a: events =====
+    // The lobby zone (and its cascaded rule) are gone; re-draw a zone on the
+    // lobby camera and arm fresh rules so the connector has something to fire.
+    const p2ZoneRes = await fetch(`${API}/v1/cameras/${camera.id}/zones`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({ label: "Lobby floor", polygon: lobbyPolygon }),
+    });
+    const { zone: p2Zone } = await p2ZoneRes.json();
+
+    const presenceRuleRes = await fetch(`${API}/v1/sites/${defaultSiteId}/rules`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        label: "Presence after hours",
+        zoneId: p2Zone.id,
+        trigger: { type: "presence_in_zone", params: {} },
+        action: { type: "raise_event", severity: "high" },
+      }),
+    });
+    const { rule: presenceRule } = await presenceRuleRes.json();
+
+    const dwellRuleRes = await fetch(`${API}/v1/sites/${defaultSiteId}/rules`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        label: "Loiterer",
+        zoneId: p2Zone.id,
+        scheduleId: businessSched.id,
+        trigger: { type: "dwell", params: { minDurationSeconds: 30 } },
+        action: { type: "raise_event", severity: "medium" },
+      }),
+    });
+    check("POST dwell rule 201", dwellRuleRes.status === 201);
+    const { rule: dwellRule } = await dwellRuleRes.json();
+
+    const badDwellRes = await fetch(`${API}/v1/sites/${defaultSiteId}/rules`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        label: "Too eager",
+        zoneId: p2Zone.id,
+        trigger: { type: "dwell", params: { minDurationSeconds: 1 } },
+        action: { type: "raise_event", severity: "low" },
+      }),
+    });
+    check("dwell below minimum duration 400", badDwellRes.status === 400);
+
+    // Connector pulls its analysis config.
+    const cfgRes = await fetch(`${API}/v1/connectors/analysis-config`, { headers: auth });
+    check("GET analysis-config 200", cfgRes.status === 200);
+    const cfg = await cfgRes.json();
+    check("analysis-config carries site timezone", cfg.timezone === "UTC");
+    check(
+      "analysis-config camera has rtsp url + zone",
+      cfg.cameras.some(
+        (c: { id: string; rtspUrl: string; zones: { id: string }[] }) =>
+          c.id === camera.id &&
+          c.rtspUrl.startsWith("rtsp://") &&
+          c.zones.some((z) => z.id === p2Zone.id),
+      ),
+    );
+    check(
+      "analysis-config lists both enabled rules with severity",
+      cfg.rules.length === 2 &&
+        cfg.rules.every(
+          (r: { cameraId: string; severity: string }) =>
+            r.cameraId === camera.id && ["high", "medium"].includes(r.severity),
+        ),
+      cfg.rules,
+    );
+    const anonCfgRes = await fetch(`${API}/v1/connectors/analysis-config`);
+    check("analysis-config without connector auth 401", anonCfgRes.status === 401);
+
+    // Ingest: one event per rule, batch of two.
+    const presenceEventId = randomUUID();
+    const dwellEventId = randomUUID();
+    const earlier = new Date(Date.now() - 60_000).toISOString();
+    const now = new Date().toISOString();
+    const ingestBody = {
+      events: [
+        {
+          id: presenceEventId,
+          ruleId: presenceRule.id,
+          occurredAt: earlier,
+          metadata: { trackId: 7, confidence: 0.91 },
+        },
+        {
+          id: dwellEventId,
+          ruleId: dwellRule.id,
+          occurredAt: now,
+          snapshotKey: "evt-snap-1",
+          metadata: { trackId: 7, dwellSeconds: 42 },
+        },
+      ],
+    };
+    const ingestRes = await fetch(`${API}/v1/connectors/events`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify(ingestBody),
+    });
+    check("POST events 202", ingestRes.status === 202);
+    const ingested = await ingestRes.json();
+    check("ingest accepts both events", ingested.accepted === 2, ingested);
+
+    // Retrying the same batch is a no-op (connector posts at-least-once).
+    const retryRes = await fetch(`${API}/v1/connectors/events`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify(ingestBody),
+    });
+    check("retried ingest dedupes", (await retryRes.json()).accepted === 0);
+
+    // A rule whose camera lives on a different connector is skipped.
+    const whRuleRes = await fetch(`${API}/v1/sites/${warehouse.id}/rules`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookieHeader },
+      body: JSON.stringify({
+        label: "Dock watch",
+        zoneId: whZone.id,
+        trigger: { type: "presence_in_zone", params: {} },
+        action: { type: "raise_event", severity: "low" },
+      }),
+    });
+    const { rule: whRule } = await whRuleRes.json();
+    const foreignIngestRes = await fetch(`${API}/v1/connectors/events`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({
+        events: [{ id: randomUUID(), ruleId: whRule.id, occurredAt: now, metadata: {} }],
+      }),
+    });
+    check(
+      "event for another connector's rule skipped",
+      (await foreignIngestRes.json()).accepted === 0,
+    );
+
+    const anonIngestRes = await fetch(`${API}/v1/connectors/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(ingestBody),
+    });
+    check("ingest without connector auth 401", anonIngestRes.status === 401);
+
+    // Operator reads the feed: newest first, labels denormalized.
+    const eventsRes = await fetch(`${API}/v1/events`, { headers: { cookie: cookieHeader } });
+    check("GET /v1/events 200", eventsRes.status === 200);
+    const { events: eventsList } = await eventsRes.json();
+    check("events feed has both events", eventsList.length === 2, eventsList.length);
+    check(
+      "events ordered newest first with denormalized labels",
+      eventsList[0].id === dwellEventId &&
+        eventsList[0].ruleLabel === "Loiterer" &&
+        eventsList[0].cameraLabel === camera.label &&
+        eventsList[0].zoneLabel === "Lobby floor" &&
+        eventsList[0].triggerType === "dwell" &&
+        eventsList[0].severity === "medium" &&
+        eventsList[0].snapshotKey === "evt-snap-1" &&
+        eventsList[0].metadata.dwellSeconds === 42,
+      eventsList[0],
+    );
+
+    const highOnlyRes = await fetch(`${API}/v1/events?severity=high`, {
+      headers: { cookie: cookieHeader },
+    });
+    const highOnly = await highOnlyRes.json();
+    check(
+      "severity filter narrows to the presence event",
+      highOnly.events.length === 1 && highOnly.events[0].id === presenceEventId,
+    );
+
+    const whEventsRes = await fetch(`${API}/v1/events?siteId=${warehouse.id}`, {
+      headers: { cookie: cookieHeader },
+    });
+    check("site filter excludes other sites", (await whEventsRes.json()).events.length === 0);
+
+    const page1Res = await fetch(`${API}/v1/events?limit=1`, {
+      headers: { cookie: cookieHeader },
+    });
+    const page1 = await page1Res.json();
+    const page2Res = await fetch(
+      `${API}/v1/events?limit=1&before=${encodeURIComponent(page1.events[0].occurredAt)}`,
+      { headers: { cookie: cookieHeader } },
+    );
+    const page2 = await page2Res.json();
+    check(
+      "before-cursor pages to the older event",
+      page1.events[0].id === dwellEventId && page2.events[0]?.id === presenceEventId,
+    );
+
+    const anonEventsRes = await fetch(`${API}/v1/events`);
+    check("GET /v1/events without session 401", anonEventsRes.status === 401);
+
+    // Deleting the rule keeps the event (audit trail) with the label intact.
+    await fetch(`${API}/v1/rules/${presenceRule.id}`, {
+      method: "DELETE",
+      headers: { cookie: cookieHeader },
+    });
+    const afterDelRes = await fetch(`${API}/v1/events?severity=high`, {
+      headers: { cookie: cookieHeader },
+    });
+    const afterDel = await afterDelRes.json();
+    check(
+      "events survive rule deletion with denormalized label",
+      afterDel.events.length === 1 &&
+        afterDel.events[0].ruleId === null &&
+        afterDel.events[0].ruleLabel === "Presence after hours",
+      afterDel.events[0],
+    );
 
     // ===== Logout =====
     const logoutRes = await fetch(`${API}/v1/auth/logout`, {

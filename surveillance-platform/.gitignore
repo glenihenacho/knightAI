@@ -26,3 +26,7 @@ target/
 .vscode/*
 !.vscode/extensions.json
 .idea
+
+# Person-detection model — fetched via scripts/fetch-model.mjs (sha256-pinned).
+**/src-tauri/assets/models/*
+!**/src-tauri/assets/models/.gitkeep

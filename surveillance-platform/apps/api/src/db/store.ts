@@ -1,11 +1,13 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type {
   Action,
+  AnalysisConfig,
   Camera,
   CameraState,
   Command,
   Connector,
   ConnectorStatus,
+  Event,
   Invite,
   PolygonPoint,
   Preview,
@@ -13,6 +15,7 @@ import type {
   Rule,
   Schedule,
   ScheduleWindow,
+  Severity,
   Site,
   Trigger,
   User,
@@ -125,6 +128,23 @@ export interface UpdateRuleInput {
   enabled?: boolean;
 }
 
+export interface IngestEventInput {
+  id: string;
+  ruleId: string;
+  occurredAt: string;
+  snapshotKey: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface ListEventsFilter {
+  siteId?: string;
+  cameraId?: string;
+  severity?: Severity;
+  /** Exclusive occurred_at cursor for paging backwards in time. */
+  before?: string;
+  limit: number;
+}
+
 export interface Store {
   createOrganization(name: string): Promise<{ id: string; name: string }>;
   getOrganization(id: string): Promise<{ id: string; name: string } | null>;
@@ -169,6 +189,21 @@ export interface Store {
   getRuleForOrg(ruleId: string, organizationId: string): Promise<Rule | null>;
   updateRule(ruleId: string, organizationId: string, input: UpdateRuleInput): Promise<Rule | null>;
   deleteRule(ruleId: string, organizationId: string): Promise<boolean>;
+
+  // Events — Phase 2. Ingest resolves each event's rule -> zone -> camera
+  // chain, verifies the camera belongs to the posting connector, denormalizes
+  // labels, and dedupes on the connector-generated id. Events whose rule is
+  // unknown, foreign, or already recorded are silently skipped (the connector
+  // retries batches at-least-once; a partial accept must not error the rest).
+  ingestConnectorEvents(
+    connectorId: string,
+    organizationId: string,
+    events: IngestEventInput[],
+  ): Promise<{ accepted: number }>;
+  listEventsForOrg(organizationId: string, filter: ListEventsFilter): Promise<Event[]>;
+  // Everything the connector's behavior engine needs, scoped to the cameras
+  // it owns: enabled rules + their zones, site schedules, site timezone.
+  getAnalysisConfigForConnector(connectorId: string): Promise<AnalysisConfig>;
 
   createPairing(organizationId: string, siteId: string, ttlSeconds?: number): Promise<PairingRecord>;
   redeemPairing(code: string, info: RedeemInfo): Promise<RedeemedConnector | null>;
@@ -467,6 +502,40 @@ function rowToRule(row: RuleRow): Rule {
     scheduleId: row.schedule_id,
     trigger: row.trigger,
     action: row.action,
+  };
+}
+
+interface EventRow {
+  id: string;
+  site_id: string;
+  rule_id: string | null;
+  rule_label: string;
+  camera_id: string | null;
+  camera_label: string;
+  zone_id: string | null;
+  zone_label: string;
+  trigger_type: string;
+  severity: Severity;
+  occurred_at: Date;
+  snapshot_key: string | null;
+  metadata: Record<string, unknown>;
+}
+
+function rowToEvent(row: EventRow): Event {
+  return {
+    id: row.id,
+    siteId: row.site_id,
+    ruleId: row.rule_id,
+    ruleLabel: row.rule_label,
+    cameraId: row.camera_id,
+    cameraLabel: row.camera_label,
+    zoneId: row.zone_id,
+    zoneLabel: row.zone_label,
+    triggerType: row.trigger_type,
+    severity: row.severity,
+    occurredAt: row.occurred_at.toISOString(),
+    snapshotKey: row.snapshot_key,
+    metadata: row.metadata,
   };
 }
 
@@ -834,6 +903,151 @@ export function createStore(databaseUrl: string): Store {
         [ruleId, organizationId],
       );
       return (rowCount ?? 0) > 0;
+    },
+
+    async ingestConnectorEvents(connectorId, organizationId, events) {
+      // INSERT ... SELECT resolves and authorizes in one statement: the event
+      // lands only if the rule's zone's camera belongs to this connector and
+      // the rule's site belongs to this org. ON CONFLICT dedupes retries.
+      return withTx(pool, async (client) => {
+        let accepted = 0;
+        for (const ev of events) {
+          const { rowCount } = await client.query(
+            `INSERT INTO events
+               (id, organization_id, site_id, connector_id, rule_id, camera_id, zone_id,
+                rule_label, camera_label, zone_label, trigger_type, severity,
+                occurred_at, snapshot_key, metadata)
+             SELECT $1, $2, r.site_id, $3, r.id, cam.id, z.id,
+                    r.label, cam.label, z.label, r.trigger->>'type', r.action->>'severity',
+                    $4, $5, $6
+               FROM rules r
+               JOIN zones z ON z.id = r.zone_id
+               JOIN cameras cam ON cam.id = z.camera_id
+               JOIN sites s ON s.id = r.site_id
+              WHERE r.id = $7
+                AND cam.connector_id = $3
+                AND s.organization_id = $2
+             ON CONFLICT (id) DO NOTHING`,
+            [
+              ev.id,
+              organizationId,
+              connectorId,
+              ev.occurredAt,
+              ev.snapshotKey,
+              JSON.stringify(ev.metadata),
+              ev.ruleId,
+            ],
+          );
+          accepted += rowCount ?? 0;
+        }
+        return { accepted };
+      });
+    },
+
+    async listEventsForOrg(organizationId, filter) {
+      const conds = ["organization_id = $1"];
+      const params: unknown[] = [organizationId];
+      if (filter.siteId) {
+        params.push(filter.siteId);
+        conds.push(`site_id = $${params.length}`);
+      }
+      if (filter.cameraId) {
+        params.push(filter.cameraId);
+        conds.push(`camera_id = $${params.length}`);
+      }
+      if (filter.severity) {
+        params.push(filter.severity);
+        conds.push(`severity = $${params.length}`);
+      }
+      if (filter.before) {
+        params.push(filter.before);
+        conds.push(`occurred_at < $${params.length}`);
+      }
+      params.push(filter.limit);
+      const { rows } = await pool.query<EventRow>(
+        `SELECT id, site_id, rule_id, rule_label, camera_id, camera_label,
+                zone_id, zone_label, trigger_type, severity, occurred_at,
+                snapshot_key, metadata
+           FROM events
+          WHERE ${conds.join(" AND ")}
+          ORDER BY occurred_at DESC
+          LIMIT $${params.length}`,
+        params,
+      );
+      return rows.map(rowToEvent);
+    },
+
+    async getAnalysisConfigForConnector(connectorId) {
+      const tzRes = await pool.query<{ timezone: string }>(
+        `SELECT s.timezone
+           FROM connectors c
+           JOIN sites s ON s.id = c.site_id
+          WHERE c.id = $1`,
+        [connectorId],
+      );
+      const camRes = await pool.query<{ id: string; label: string; rtsp_url: string }>(
+        `SELECT id, label, rtsp_url
+           FROM cameras
+          WHERE connector_id = $1
+          ORDER BY created_at`,
+        [connectorId],
+      );
+      const zoneRes = await pool.query<{
+        id: string;
+        camera_id: string;
+        label: string;
+        polygon: PolygonPoint[];
+      }>(
+        `SELECT z.id, z.camera_id, z.label, z.polygon
+           FROM zones z
+           JOIN cameras cam ON cam.id = z.camera_id
+          WHERE cam.connector_id = $1`,
+        [connectorId],
+      );
+      const schedRes = await pool.query<{ id: string; windows: ScheduleWindow[] }>(
+        `SELECT s.id, s.windows
+           FROM schedules s
+          WHERE s.site_id = (SELECT site_id FROM connectors WHERE id = $1)`,
+        [connectorId],
+      );
+      const ruleRes = await pool.query<{
+        id: string;
+        label: string;
+        camera_id: string;
+        zone_id: string;
+        schedule_id: string | null;
+        trigger: Trigger;
+        action: Action;
+      }>(
+        `SELECT r.id, r.label, z.camera_id, r.zone_id, r.schedule_id, r.trigger, r.action
+           FROM rules r
+           JOIN zones z ON z.id = r.zone_id
+           JOIN cameras cam ON cam.id = z.camera_id
+          WHERE cam.connector_id = $1
+            AND r.enabled`,
+        [connectorId],
+      );
+      return {
+        timezone: tzRes.rows[0]?.timezone ?? "UTC",
+        cameras: camRes.rows.map((c) => ({
+          id: c.id,
+          label: c.label,
+          rtspUrl: c.rtsp_url,
+          zones: zoneRes.rows
+            .filter((z) => z.camera_id === c.id)
+            .map((z) => ({ id: z.id, label: z.label, polygon: z.polygon })),
+        })),
+        schedules: schedRes.rows.map((s) => ({ id: s.id, windows: s.windows })),
+        rules: ruleRes.rows.map((r) => ({
+          id: r.id,
+          label: r.label,
+          cameraId: r.camera_id,
+          zoneId: r.zone_id,
+          scheduleId: r.schedule_id,
+          trigger: r.trigger,
+          severity: r.action.severity,
+        })),
+      };
     },
 
     async createPairing(organizationId, siteId, ttlSeconds = 600) {

@@ -1,9 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import type { Rule, Schedule, Severity, Zone } from "@surveillance/shared";
+import type { Rule, Schedule, Severity, Trigger, Zone } from "@surveillance/shared";
 import { Button, Input, Modal, Select } from "@surveillance/ui";
 import { api } from "@/lib/api";
+
+type TriggerType = Trigger["type"];
+
+// Mirror the zod bounds in @surveillance/shared rule.ts.
+const DWELL_RANGE = { min: 5, max: 3600 };
+const REENTRY_RANGE = { min: 10, max: 86400 };
 
 interface CameraZones {
   cameraId: string;
@@ -34,8 +40,36 @@ export function RuleForm({ siteId, rule, schedules, cameras, onClose, onSaved }:
   const [zoneId, setZoneId] = useState(rule?.zoneId ?? zonesForCamera[0]?.id ?? "");
   const [scheduleId, setScheduleId] = useState(rule?.scheduleId ?? "");
   const [severity, setSeverity] = useState<Severity>(rule?.action.severity ?? "medium");
+  const [triggerType, setTriggerType] = useState<TriggerType>(rule?.trigger.type ?? "presence_in_zone");
+  const [dwellSeconds, setDwellSeconds] = useState(
+    rule?.trigger.type === "dwell" ? String(rule.trigger.params.minDurationSeconds) : "60",
+  );
+  const [reentrySeconds, setReentrySeconds] = useState(
+    rule?.trigger.type === "reentry" ? String(rule.trigger.params.withinSeconds) : "300",
+  );
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  function buildTrigger(): Trigger {
+    switch (triggerType) {
+      case "dwell":
+        return { type: "dwell", params: { minDurationSeconds: Number(dwellSeconds) } };
+      case "reentry":
+        return { type: "reentry", params: { withinSeconds: Number(reentrySeconds) } };
+      default:
+        return { type: "presence_in_zone", params: {} };
+    }
+  }
+
+  function inRange(raw: string, range: { min: number; max: number }): boolean {
+    const n = Number(raw);
+    return Number.isInteger(n) && n >= range.min && n <= range.max;
+  }
+
+  const triggerValid =
+    triggerType === "presence_in_zone" ||
+    (triggerType === "dwell" && inRange(dwellSeconds, DWELL_RANGE)) ||
+    (triggerType === "reentry" && inRange(reentrySeconds, REENTRY_RANGE));
 
   function selectCamera(id: string) {
     setCameraId(id);
@@ -51,7 +85,7 @@ export function RuleForm({ siteId, rule, schedules, cameras, onClose, onSaved }:
       label,
       zoneId,
       scheduleId: scheduleId === "" ? null : scheduleId,
-      trigger: { type: "presence_in_zone" as const, params: {} },
+      trigger: buildTrigger(),
       action: { type: "raise_event" as const, severity },
     };
     try {
@@ -100,15 +134,36 @@ export function RuleForm({ siteId, rule, schedules, cameras, onClose, onSaved }:
             ...schedules.map((s) => ({ value: s.id, label: s.label })),
           ]}
         />
-        {/* Phase 1 ships a single trigger type; Phase 2 adds dwell / re-entry /
-            path deviation, which is when this unlocks. */}
+        {/* path_deviation stays deferred until reference paths can be
+            authored; the engine has nothing to compare a track against. */}
         <Select
           label="Trigger"
-          value="presence_in_zone"
-          onChange={() => undefined}
-          options={[{ value: "presence_in_zone", label: "Presence in zone" }]}
-          disabled
+          value={triggerType}
+          onChange={(v) => setTriggerType(v as TriggerType)}
+          options={[
+            { value: "presence_in_zone", label: "Presence in zone" },
+            { value: "dwell", label: "Dwell (loitering)" },
+            { value: "reentry", label: "Re-entry" },
+          ]}
         />
+        {triggerType === "dwell" && (
+          <Input
+            label={`Minimum dwell — seconds (${DWELL_RANGE.min}–${DWELL_RANGE.max})`}
+            type="number"
+            value={dwellSeconds}
+            onChange={setDwellSeconds}
+            required
+          />
+        )}
+        {triggerType === "reentry" && (
+          <Input
+            label={`Re-entry window — seconds (${REENTRY_RANGE.min}–${REENTRY_RANGE.max})`}
+            type="number"
+            value={reentrySeconds}
+            onChange={setReentrySeconds}
+            required
+          />
+        )}
         <Select
           label="Severity"
           value={severity}
@@ -123,7 +178,7 @@ export function RuleForm({ siteId, rule, schedules, cameras, onClose, onSaved }:
           <Button
             type="submit"
             variant="primary"
-            disabled={pending || label.length === 0 || zoneId === ""}
+            disabled={pending || label.length === 0 || zoneId === "" || !triggerValid}
           >
             {pending ? "Saving…" : rule ? "Save changes →" : "Create rule →"}
           </Button>

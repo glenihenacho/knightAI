@@ -1,3 +1,4 @@
+mod analysis_worker;
 mod pairing;
 mod poller;
 mod preview;
@@ -43,7 +44,8 @@ async fn pair_with_code(
         .map_err(|e| e.to_string())?;
     let mut connector = state.connector.lock();
     connector.set_identity(identity.clone());
-    poller::spawn(app, connector.clone_handle(), identity.clone());
+    poller::spawn(app.clone(), connector.clone_handle(), identity.clone());
+    analysis_worker::spawn(app, identity.clone());
     Ok(PairingStatus::Paired {
         connector_id: identity.connector_id,
         api_base_url: identity.api_base_url,
@@ -56,6 +58,13 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let connector = ConnectorState::load(app.handle())?;
+            // Re-arm the background loops for an already-paired connector.
+            // Without this a restarted connector never polled for commands
+            // again — pairing was the only spawn site.
+            if let Some(identity) = connector.clone_handle() {
+                poller::spawn(app.handle().clone(), None, identity.clone());
+                analysis_worker::spawn(app.handle().clone(), identity);
+            }
             app.manage(AppState {
                 connector: Arc::new(Mutex::new(connector)),
             });

@@ -21,6 +21,7 @@ import { registerSiteRoutes } from "./routes/sites.js";
 import { registerZoneRoutes } from "./routes/zones.js";
 import { registerScheduleRoutes } from "./routes/schedules.js";
 import { registerRuleRoutes } from "./routes/rules.js";
+import { registerEventRoutes } from "./routes/events.js";
 import { ZodError } from "zod";
 
 async function main() {
@@ -99,6 +100,7 @@ async function main() {
   registerZoneRoutes(app, store);
   registerScheduleRoutes(app, store);
   registerRuleRoutes(app, store);
+  registerEventRoutes(app, store);
   registerPairingRoutes(app, store, env);
   registerConnectorRoutes(app, store);
   registerCameraRoutes(app, store);
