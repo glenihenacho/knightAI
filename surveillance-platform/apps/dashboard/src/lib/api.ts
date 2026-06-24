@@ -11,6 +11,7 @@ import type {
   Event as EventRecord,
   Invite,
   MeResponse,
+  OnvifDevice,
   PreviewSessionResponse,
   Rule,
   Schedule,
@@ -225,6 +226,24 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(req),
     }),
+
+  startDiscovery: (connectorId: string) =>
+    call<{ commandId: string }>(
+      `/v1/connectors/${encodeURIComponent(connectorId)}/discoveries`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    ),
+
+  getDiscovery: (connectorId: string, commandId: string) =>
+    call<{ status: string; devices: OnvifDevice[]; errorMessage: string | null }>(
+      `/v1/connectors/${encodeURIComponent(connectorId)}/discoveries/${encodeURIComponent(
+        commandId,
+      )}`,
+      { method: "GET" },
+    ),
 
   startPreview: (cameraId: string) =>
     call<PreviewSessionResponse>(

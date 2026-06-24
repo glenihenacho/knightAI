@@ -5,6 +5,7 @@ import type {
   Camera,
   CameraState,
   Command,
+  CommandResult,
   Connector,
   ConnectorStatus,
   Event,
@@ -256,6 +257,12 @@ export interface Store {
     commandId: string;
     result: unknown;
   }): Promise<CommandRowRef | null>;
+  // Read a command (status + stored result) scoped to the operator's org, so a
+  // dashboard can poll an async command (e.g. ONVIF discovery) it issued.
+  getCommandForOrg(
+    commandId: string,
+    organizationId: string,
+  ): Promise<{ status: string; kind: Command["kind"]; result: CommandResult | null } | null>;
 
   // HLS preview sessions.
   createPreview(input: {
@@ -1351,6 +1358,21 @@ export function createStore(databaseUrl: string): Store {
           kind: row.kind,
         };
       });
+    },
+
+    async getCommandForOrg(commandId, organizationId) {
+      const { rows } = await pool.query<{
+        status: string;
+        kind: Command["kind"];
+        result: CommandResult | null;
+      }>(
+        `SELECT c.status, c.kind, c.result
+           FROM commands c
+           JOIN connectors n ON n.id = c.connector_id
+          WHERE c.id = $1 AND n.organization_id = $2`,
+        [commandId, organizationId],
+      );
+      return rows[0] ?? null;
     },
 
     async createPreview({ cameraId, maxDurationSeconds, startedBy = "operator" }) {

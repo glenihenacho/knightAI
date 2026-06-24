@@ -1,3 +1,4 @@
+mod onvif;
 mod pairing;
 mod poller;
 mod preview;

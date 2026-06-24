@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::onvif;
 use crate::preview::{PreviewManager, StartPreviewPayload, StartPreviewResult, StopPreviewPayload};
 use crate::time::now_iso8601;
 use crate::{rtsp, state::ConnectorIdentity};
@@ -40,6 +41,29 @@ enum Command {
         id: String,
         payload: StopPreviewPayload,
     },
+    DiscoverOnvif {
+        id: String,
+        #[serde(default)]
+        payload: DiscoverOnvifPayload,
+    },
+}
+
+#[derive(Deserialize)]
+struct DiscoverOnvifPayload {
+    #[serde(default = "default_discover_timeout", rename = "timeoutMs")]
+    timeout_ms: u64,
+}
+
+fn default_discover_timeout() -> u64 {
+    4_000
+}
+
+impl Default for DiscoverOnvifPayload {
+    fn default() -> Self {
+        Self {
+            timeout_ms: default_discover_timeout(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -69,6 +93,8 @@ struct CommandResult {
     validate_rtsp: Option<rtsp::ValidationResult>,
     #[serde(rename = "startPreview", skip_serializing_if = "Option::is_none")]
     start_preview: Option<StartPreviewResult>,
+    #[serde(rename = "discoverOnvif", skip_serializing_if = "Option::is_none")]
+    discover_onvif: Option<onvif::DiscoverResult>,
     #[serde(rename = "errorMessage", skip_serializing_if = "Option::is_none")]
     error_message: Option<String>,
 }
@@ -78,6 +104,7 @@ struct CommandOutcome {
     status: &'static str,
     validate_rtsp: Option<rtsp::ValidationResult>,
     start_preview: Option<StartPreviewResult>,
+    discover_onvif: Option<onvif::DiscoverResult>,
     error_message: Option<String>,
 }
 
@@ -153,6 +180,7 @@ async fn handle_command(
                         status: "ok",
                         validate_rtsp: Some(result),
                         start_preview: None,
+                        discover_onvif: None,
                         error_message: None,
                     }
                 }
@@ -161,6 +189,7 @@ async fn handle_command(
                     status: "ok",
                     validate_rtsp: Some(result),
                     start_preview: None,
+                    discover_onvif: None,
                     error_message: None,
                 },
                 Err(e) => CommandOutcome {
@@ -168,6 +197,7 @@ async fn handle_command(
                     status: "failed",
                     validate_rtsp: None,
                     start_preview: None,
+                    discover_onvif: None,
                     error_message: Some(e.to_string()),
                 },
             }
@@ -177,6 +207,7 @@ async fn handle_command(
             status: "ok",
             validate_rtsp: None,
             start_preview: None,
+            discover_onvif: None,
             error_message: None,
         },
         Command::StartPreview { id, payload } | Command::StartDetection { id, payload } => match manager.start(identity, &payload).await {
@@ -185,6 +216,7 @@ async fn handle_command(
                 status: "ok",
                 validate_rtsp: None,
                 start_preview: Some(result),
+                discover_onvif: None,
                 error_message: None,
             },
             Err(e) => CommandOutcome {
@@ -192,6 +224,7 @@ async fn handle_command(
                 status: "failed",
                 validate_rtsp: None,
                 start_preview: None,
+                discover_onvif: None,
                 error_message: Some(e.to_string()),
             },
         },
@@ -202,9 +235,28 @@ async fn handle_command(
                 status: "ok",
                 validate_rtsp: None,
                 start_preview: None,
+                discover_onvif: None,
                 error_message: None,
             }
         }
+        Command::DiscoverOnvif { id, payload } => match onvif::discover(payload.timeout_ms).await {
+            Ok(result) => CommandOutcome {
+                id,
+                status: "ok",
+                validate_rtsp: None,
+                start_preview: None,
+                discover_onvif: Some(result),
+                error_message: None,
+            },
+            Err(e) => CommandOutcome {
+                id,
+                status: "failed",
+                validate_rtsp: None,
+                start_preview: None,
+                discover_onvif: None,
+                error_message: Some(e.to_string()),
+            },
+        },
     };
 
     let result = CommandResult {
@@ -214,6 +266,7 @@ async fn handle_command(
         finished_at: now_iso8601(),
         validate_rtsp: outcome.validate_rtsp,
         start_preview: outcome.start_preview,
+        discover_onvif: outcome.discover_onvif,
         error_message: outcome.error_message,
     };
 

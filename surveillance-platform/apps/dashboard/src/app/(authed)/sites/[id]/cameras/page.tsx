@@ -2,6 +2,7 @@ import Link from "next/link";
 import { CameraPreview, Eyebrow } from "@surveillance/ui";
 import { SNAPSHOT_URL } from "@/lib/api";
 import { listCamerasServer, listConnectorsServer } from "@/lib/server-api";
+import { AddCameraPanel } from "./AddCameraPanel";
 
 export const dynamic = "force-dynamic";
 
@@ -11,10 +12,14 @@ export default async function SiteCamerasPage({ params }: { params: { id: string
     listConnectorsServer(),
   ]);
   // Cameras inherit their site through the connector they're registered on.
-  const siteConnectorIds = new Set(connectors.filter((c) => c.siteId === params.id).map((c) => c.id));
+  const siteConnectors = connectors.filter((c) => c.siteId === params.id);
+  const siteConnectorIds = new Set(siteConnectors.map((c) => c.id));
   const siteCameras = cameras.filter((cam) => siteConnectorIds.has(cam.connectorId));
+  // Cameras attach to a connector; prefer an online one to run scans / probes.
+  const targetConnector =
+    siteConnectors.find((c) => c.status === "online") ?? siteConnectors[0] ?? null;
 
-  if (siteCameras.length === 0) {
+  if (!targetConnector) {
     return (
       <div
         style={{
@@ -23,7 +28,7 @@ export default async function SiteCamerasPage({ params }: { params: { id: string
           textAlign: "center",
         }}
       >
-        <Eyebrow>No cameras yet</Eyebrow>
+        <Eyebrow>No connector yet</Eyebrow>
         <p style={{ color: "var(--ink-2)", marginTop: 12 }}>
           Pair a connector at this site first, then add cameras to it.
         </p>
@@ -32,14 +37,31 @@ export default async function SiteCamerasPage({ params }: { params: { id: string
   }
 
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))",
-        gap: 24,
-      }}
-    >
-      {siteCameras.map((cam) => (
+    <div>
+      <AddCameraPanel connectorId={targetConnector.id} />
+
+      {siteCameras.length === 0 ? (
+        <div
+          style={{
+            padding: "48px 24px",
+            border: "1px dashed var(--rule-2)",
+            textAlign: "center",
+          }}
+        >
+          <Eyebrow>No cameras yet</Eyebrow>
+          <p style={{ color: "var(--ink-2)", marginTop: 12 }}>
+            Scan for ONVIF cameras above, or add one by RTSP URL.
+          </p>
+        </div>
+      ) : (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))",
+            gap: 24,
+          }}
+        >
+          {siteCameras.map((cam) => (
         <div key={cam.id} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <CameraPreview
             label={cam.label}
@@ -64,8 +86,10 @@ export default async function SiteCamerasPage({ params }: { params: { id: string
           >
             Watch live →
           </Link>
+            </div>
+          ))}
         </div>
-      ))}
+      )}
     </div>
   );
 }

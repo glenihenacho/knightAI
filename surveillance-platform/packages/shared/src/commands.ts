@@ -11,6 +11,9 @@ export const CommandKindSchema = z.enum([
   // server-side worker consumes the segments for detection.
   "start_detection",
   "stop_detection",
+  // LAN camera discovery: the connector runs an ONVIF WS-Discovery multicast
+  // probe and returns the devices that answer. No camera is targeted.
+  "discover_onvif",
 ]);
 
 export const ValidateRtspPayloadSchema = z.object({
@@ -41,6 +44,11 @@ export const StartPreviewPayloadSchema = z.object({
 export const StopPreviewPayloadSchema = z.object({
   cameraId: z.string().uuid(),
   previewId: z.string().uuid(),
+});
+
+export const DiscoverOnvifPayloadSchema = z.object({
+  // How long the connector listens for ONVIF probe answers before returning.
+  timeoutMs: z.number().int().positive().max(15_000).default(4_000),
 });
 
 export const CommandSchema = z.discriminatedUnion("kind", [
@@ -86,6 +94,12 @@ export const CommandSchema = z.discriminatedUnion("kind", [
     issuedAt: z.string().datetime(),
     payload: StopPreviewPayloadSchema,
   }),
+  z.object({
+    id: z.string().uuid(),
+    kind: z.literal("discover_onvif"),
+    issuedAt: z.string().datetime(),
+    payload: DiscoverOnvifPayloadSchema,
+  }),
 ]);
 
 export const CommandResultStatusSchema = z.enum(["ok", "failed", "timeout"]);
@@ -106,6 +120,21 @@ export const StartPreviewResultSchema = z.object({
   startedAt: z.string().datetime(),
 });
 
+export const OnvifDeviceSchema = z.object({
+  // The camera's host/IP, extracted from the ONVIF service address. This is
+  // what the operator drops into an RTSP URL.
+  address: z.string(),
+  name: z.string().optional(),
+  hardware: z.string().optional(),
+  // Full ONVIF device-service URL the camera advertised (e.g.
+  // http://192.168.1.50/onvif/device_service).
+  xaddr: z.string().optional(),
+});
+
+export const DiscoverOnvifResultSchema = z.object({
+  devices: z.array(OnvifDeviceSchema),
+});
+
 export const CommandResultSchema = z.object({
   commandId: z.string().uuid(),
   status: CommandResultStatusSchema,
@@ -113,6 +142,7 @@ export const CommandResultSchema = z.object({
   finishedAt: z.string().datetime(),
   validateRtsp: ValidateRtspResultSchema.optional(),
   startPreview: StartPreviewResultSchema.optional(),
+  discoverOnvif: DiscoverOnvifResultSchema.optional(),
   errorMessage: z.string().optional(),
 });
 
@@ -121,3 +151,5 @@ export type Command = z.infer<typeof CommandSchema>;
 export type CommandResult = z.infer<typeof CommandResultSchema>;
 export type ValidateRtspResult = z.infer<typeof ValidateRtspResultSchema>;
 export type StartPreviewResult = z.infer<typeof StartPreviewResultSchema>;
+export type OnvifDevice = z.infer<typeof OnvifDeviceSchema>;
+export type DiscoverOnvifResult = z.infer<typeof DiscoverOnvifResultSchema>;

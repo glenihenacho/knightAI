@@ -608,6 +608,55 @@ async function main() {
     });
     check("submit result 204", resultRes.status === 204);
 
+    // --- F4: ONVIF discovery round-trip (operator triggers, connector answers).
+    const discRes = await fetch(`${API}/v1/connectors/${redeemed.connectorId}/discoveries`, {
+      method: "POST",
+      headers: { cookie: cookieHeader, "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    check("start discovery 202", discRes.status === 202);
+    const { commandId: discCommandId } = await discRes.json();
+
+    const discCmdRes = await fetch(`${API}/v1/connectors/commands/next`, { headers: auth });
+    const discCmd = await discCmdRes.json();
+    check(
+      "queued command is discover_onvif",
+      discCmd.id === discCommandId && discCmd.kind === "discover_onvif",
+    );
+
+    await fetch(`${API}/v1/connectors/commands/${discCmd.id}/result`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: discCmd.id,
+        status: "ok",
+        durationMs: 4000,
+        finishedAt: new Date().toISOString(),
+        discoverOnvif: {
+          devices: [
+            {
+              address: "192.168.1.50",
+              name: "Front Cam",
+              hardware: "Acme-X",
+              xaddr: "http://192.168.1.50/onvif/device_service",
+            },
+          ],
+        },
+      }),
+    });
+
+    const discPollRes = await fetch(
+      `${API}/v1/connectors/${redeemed.connectorId}/discoveries/${discCommandId}`,
+      { headers: { cookie: cookieHeader } },
+    );
+    check("poll discovery 200", discPollRes.status === 200);
+    const discResult = await discPollRes.json();
+    check("discovery status done", discResult.status === "done");
+    check(
+      "discovery returns the device",
+      discResult.devices.length === 1 && discResult.devices[0].address === "192.168.1.50",
+    );
+
     // Operator sees camera state online.
     const camsRes = await fetch(`${API}/v1/cameras`, { headers: { cookie: cookieHeader } });
     const cams = await camsRes.json();
