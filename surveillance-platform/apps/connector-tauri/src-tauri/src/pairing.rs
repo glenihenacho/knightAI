@@ -21,6 +21,8 @@ struct RedeemResponse {
     api_base_url: String,
     #[serde(rename = "pollIntervalMs")]
     poll_interval_ms: u64,
+    #[serde(rename = "siteName", default)]
+    site_name: String,
 }
 
 pub async fn redeem(api_url: &str, code: &str) -> Result<ConnectorIdentity> {
@@ -56,6 +58,7 @@ pub async fn redeem(api_url: &str, code: &str) -> Result<ConnectorIdentity> {
         connector_token: body.connector_token,
         api_base_url: body.api_base_url,
         poll_interval_ms: body.poll_interval_ms,
+        site_name: body.site_name,
     })
 }
 

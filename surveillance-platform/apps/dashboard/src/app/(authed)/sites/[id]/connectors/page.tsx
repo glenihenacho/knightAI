@@ -1,7 +1,24 @@
+import type { Connector, ConnectorStatus } from "@surveillance/shared";
 import { Eyebrow, StatusBadge } from "@surveillance/ui";
 import { listConnectorsServer } from "@/lib/server-api";
 
 export const dynamic = "force-dynamic";
+
+// The connectors row is stamped "online" at redeem and never flipped back by
+// the API; last_seen_at (refreshed on every command poll, default every 5s) is
+// the live signal. Treat an "online" connector whose last poll is older than
+// this as offline so the badge reflects reality.
+const ONLINE_STALE_MS = 90_000;
+
+function effectiveStatus(c: Connector): ConnectorStatus {
+  if (c.status === "online") {
+    if (!c.lastSeenAt) return "offline";
+    if (Date.now() - new Date(c.lastSeenAt).getTime() > ONLINE_STALE_MS) {
+      return "offline";
+    }
+  }
+  return c.status;
+}
 
 export default async function SiteConnectorsPage({ params }: { params: { id: string } }) {
   const { connectors: allConnectors } = await listConnectorsServer();
@@ -74,7 +91,7 @@ export default async function SiteConnectorsPage({ params }: { params: { id: str
               ? `Last seen ${new Date(c.lastSeenAt).toLocaleString()}`
               : "Never seen"}
           </div>
-          <StatusBadge status={c.status} />
+          <StatusBadge status={effectiveStatus(c)} />
         </div>
       ))}
     </div>

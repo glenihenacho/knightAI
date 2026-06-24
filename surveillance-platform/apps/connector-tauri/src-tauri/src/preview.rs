@@ -186,6 +186,22 @@ impl PreviewManager {
         }
         Ok(())
     }
+
+    /// Kill every active preview/detection session. Called on re-pair so the
+    /// old site's cameras stop streaming before the poller is torn down —
+    /// without this, aborting the poll task would orphan running ffmpeg
+    /// children (Session has no Drop that kills them).
+    pub fn stop_all(&self) {
+        let drained: Vec<Session> = {
+            let mut sessions = self.sessions.lock();
+            sessions.drain().map(|(_, session)| session).collect()
+        };
+        for Session { child, uploader, log_drain, _temp: _ } in drained {
+            let _ = child.kill();
+            uploader.abort();
+            log_drain.abort();
+        }
+    }
 }
 
 async fn run_uploader(preview_id: String, dir: PathBuf, identity: ConnectorIdentity) {

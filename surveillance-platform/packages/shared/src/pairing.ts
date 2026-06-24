@@ -30,6 +30,9 @@ export const RedeemPairingResponseSchema = z.object({
   connectorToken: z.string().min(32),
   apiBaseUrl: z.string().url(),
   pollIntervalMs: z.number().int().positive(),
+  // Label of the site this connector was paired to, shown on the connector's
+  // running screen so multi-site operators can tell machines apart.
+  siteName: z.string(),
 });
 
 export type PairingCode = z.infer<typeof PairingCodeSchema>;

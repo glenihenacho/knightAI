@@ -43,6 +43,7 @@ export interface RedeemInfo {
 export interface RedeemedConnector {
   connector: Connector;
   token: string;
+  siteName: string;
 }
 
 export interface CommandRowRef {
@@ -1165,6 +1166,14 @@ export function createStore(databaseUrl: string): Store {
           siteId = fallback.rows[0]!.id;
         }
 
+        // Resolved site's label — returned so the connector can show which
+        // site it's bound to. siteId is guaranteed set above.
+        const siteRow = await client.query<{ label: string }>(
+          `SELECT label FROM sites WHERE id = $1`,
+          [siteId],
+        );
+        const siteName = siteRow.rows[0]?.label ?? "";
+
         const connectorId = randomUUID();
         const token = generateConnectorToken();
         const tokenHash = hashToken(token);
@@ -1183,7 +1192,7 @@ export function createStore(databaseUrl: string): Store {
           [connectorId, pairing.id],
         );
 
-        return { connector: rowToConnector(inserted.rows[0]!), token };
+        return { connector: rowToConnector(inserted.rows[0]!), token, siteName };
       });
     },
 

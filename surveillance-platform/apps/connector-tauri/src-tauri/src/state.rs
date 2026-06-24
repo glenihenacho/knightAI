@@ -12,6 +12,11 @@ pub struct ConnectorIdentity {
     pub connector_token: String,
     pub api_base_url: String,
     pub poll_interval_ms: u64,
+    // Human-readable site this connector is paired to, surfaced on the running
+    // screen so an operator running several machines can tell them apart.
+    // `default` keeps identity.json written before this field still loadable.
+    #[serde(default)]
+    pub site_name: String,
 }
 
 pub struct ConnectorState {
@@ -39,6 +44,7 @@ impl ConnectorState {
             Some(id) => PairingStatus::Paired {
                 connector_id: id.connector_id.clone(),
                 api_base_url: id.api_base_url.clone(),
+                site_name: id.site_name.clone(),
             },
             None => PairingStatus::Unpaired,
         }
@@ -49,6 +55,17 @@ impl ConnectorState {
             let _ = fs::write(&self.config_path, raw);
         }
         self.identity = Some(identity);
+    }
+
+    /// Drop the persisted pairing so the connector returns to the unpaired
+    /// state. Used by `reset_pairing` to re-point a machine at another site
+    /// without hand-deleting identity.json.
+    pub fn clear_identity(&mut self) -> Result<()> {
+        if self.config_path.exists() {
+            fs::remove_file(&self.config_path)?;
+        }
+        self.identity = None;
+        Ok(())
     }
 
     pub fn clone_handle(&self) -> Option<ConnectorIdentity> {

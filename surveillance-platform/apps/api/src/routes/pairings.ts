@@ -48,6 +48,7 @@ export function registerPairingRoutes(app: FastifyInstance, store: Store, env: E
       connectorToken: result.token,
       apiBaseUrl: env.PUBLIC_BASE_URL,
       pollIntervalMs: env.CONNECTOR_POLL_INTERVAL_MS,
+      siteName: result.siteName,
     };
     return reply.code(200).send(response);
   });

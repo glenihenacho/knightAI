@@ -81,16 +81,16 @@ struct CommandOutcome {
     error_message: Option<String>,
 }
 
-/// Spawn the polling loop for a paired connector. Idempotent for a given identity:
-/// callers should ensure they don't spawn twice.
+/// Spawn the polling loop for a paired connector and return its task handle so
+/// the caller can abort it on re-pair/reset. Idempotent for a given identity:
+/// callers should ensure they don't spawn twice (and abort the prior handle
+/// before spawning a new one).
 pub fn spawn(
-    app: tauri::AppHandle,
-    _existing: Option<ConnectorIdentity>,
+    manager: PreviewManager,
     identity: ConnectorIdentity,
-) {
+) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         let client = reqwest::Client::new();
-        let manager = PreviewManager::new(app);
         loop {
             match poll_once(&client, &identity, &manager).await {
                 Ok(Some(())) => {} // got a command, immediately try again
@@ -103,7 +103,7 @@ pub fn spawn(
                 }
             }
         }
-    });
+    })
 }
 
 async fn poll_once(

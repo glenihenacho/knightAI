@@ -5,6 +5,7 @@ interface PairedState {
   status: "paired";
   connectorId: string;
   apiBaseUrl: string;
+  siteName: string;
 }
 
 interface UnpairedState {
@@ -31,6 +32,17 @@ export function App() {
     setError(null);
     try {
       const next = await invoke<PairedState>("pair_with_code", { apiUrl, code });
+      setState(next);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function reset() {
+    setError(null);
+    try {
+      const next = await invoke<UnpairedState>("reset_pairing");
+      setCode("");
       setState(next);
     } catch (e) {
       setError(String(e));
@@ -68,12 +80,22 @@ export function App() {
   }
 
   return (
-    <section style={{ padding: 24 }}>
+    <section style={{ padding: 24, maxWidth: 480 }}>
       <h1>Connector running</h1>
+      <p>
+        Paired to <strong>{state.siteName || "—"}</strong>.
+      </p>
       <p>
         Connector <code>{state.connectorId}</code> is polling{" "}
         <code>{state.apiBaseUrl}</code> for commands.
       </p>
+      <hr style={{ margin: "20px 0", border: "none", borderTop: "1px solid #ddd" }} />
+      <p style={{ fontSize: 13, color: "#555" }}>
+        Re-pair to move this machine to a different site. This stops the current
+        site's streams and clears the pairing.
+      </p>
+      <button onClick={reset}>Re-pair this connector</button>
+      {error && <p style={{ color: "crimson" }}>{error}</p>}
     </section>
   );
 }

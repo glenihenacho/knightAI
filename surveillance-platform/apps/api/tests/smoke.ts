@@ -921,6 +921,7 @@ async function main() {
       (c: { id: string }) => c.id === siteRedeemed.connectorId,
     );
     check("redeemed connector attached to chosen site", warehouseConn?.siteId === warehouse.id);
+    check("redeem response carries paired site name", siteRedeemed.siteName === "Warehouse A (north)");
 
     const delAttachedRes = await fetch(`${API}/v1/sites/${warehouse.id}`, {
       method: "DELETE",
