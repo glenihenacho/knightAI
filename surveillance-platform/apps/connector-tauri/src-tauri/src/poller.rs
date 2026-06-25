@@ -112,17 +112,49 @@ struct CommandOutcome {
 /// the caller can abort it on re-pair/reset. Idempotent for a given identity:
 /// callers should ensure they don't spawn twice (and abort the prior handle
 /// before spawning a new one).
+// After this many consecutive empty polls with nothing streaming, the
+// connector goes dormant: it stops hitting the DB-backed /commands/next
+// endpoint (which keeps Neon's compute awake) and instead waits for an
+// explicit wake via the in-memory wake-check endpoint. At the default 5s poll
+// interval, 12 empty polls is ~60s of genuine idleness before sleeping.
+const IDLE_POLLS_BEFORE_DORMANT: u32 = 12;
+// How often a dormant connector checks whether it has been woken. This hits an
+// in-memory endpoint only (no database), so it does not keep Neon awake.
+const WAKE_CHECK_INTERVAL_MS: u64 = 15_000;
+
+#[derive(Deserialize)]
+struct WakeResponse {
+    wake: bool,
+}
+
 pub fn spawn(
     manager: PreviewManager,
     identity: ConnectorIdentity,
 ) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         let client = reqwest::Client::new();
+        let mut idle_polls: u32 = 0;
         loop {
             match poll_once(&client, &identity, &manager).await {
-                Ok(Some(())) => {} // got a command, immediately try again
+                Ok(Some(())) => {
+                    // Got a command; reset idleness and immediately try again.
+                    idle_polls = 0;
+                }
                 Ok(None) => {
-                    tokio::time::sleep(Duration::from_millis(identity.poll_interval_ms)).await;
+                    // Only count toward dormancy when nothing is streaming —
+                    // an active preview/detection must keep polling to receive
+                    // its stop command.
+                    if manager.active_count() == 0 {
+                        idle_polls = idle_polls.saturating_add(1);
+                    } else {
+                        idle_polls = 0;
+                    }
+                    if idle_polls >= IDLE_POLLS_BEFORE_DORMANT {
+                        wait_for_wake(&client, &identity).await;
+                        idle_polls = 0;
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(identity.poll_interval_ms)).await;
+                    }
                 }
                 Err(err) => {
                     eprintln!("poll error: {err:?}");
@@ -131,6 +163,43 @@ pub fn spawn(
             }
         }
     })
+}
+
+/// Block until the API reports this connector has been woken (or the wake-check
+/// can't be completed, in which case we resume normal polling, which is safe —
+/// a full poll re-authenticates and re-seeds the server's token cache).
+async fn wait_for_wake(client: &reqwest::Client, identity: &ConnectorIdentity) {
+    loop {
+        match check_wake(client, identity).await {
+            Ok(true) => return,
+            Ok(false) => {
+                tokio::time::sleep(Duration::from_millis(WAKE_CHECK_INTERVAL_MS)).await;
+            }
+            Err(err) => {
+                eprintln!("wake-check error: {err:?}");
+                return;
+            }
+        }
+    }
+}
+
+async fn check_wake(client: &reqwest::Client, identity: &ConnectorIdentity) -> anyhow::Result<bool> {
+    let res = client
+        .get(format!(
+            "{}/v1/connectors/commands/wake-check",
+            identity.api_base_url.trim_end_matches('/')
+        ))
+        .bearer_auth(&identity.connector_token)
+        .header("x-connector-id", &identity.connector_id)
+        .send()
+        .await?;
+    // Any non-success (e.g. the server's token cache was cleared by a restart)
+    // means "resume full polling" so we re-authenticate against the database.
+    if !res.status().is_success() {
+        return Ok(true);
+    }
+    let body: WakeResponse = res.json().await?;
+    Ok(body.wake)
 }
 
 async fn poll_once(

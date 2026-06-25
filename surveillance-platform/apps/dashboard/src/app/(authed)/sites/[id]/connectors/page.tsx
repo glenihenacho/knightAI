@@ -1,13 +1,16 @@
 import type { Connector, ConnectorStatus } from "@surveillance/shared";
 import { Eyebrow, StatusBadge } from "@surveillance/ui";
 import { listConnectorsServer } from "@/lib/server-api";
+import { WakeConnectorButton } from "@/app/_components/wake-connector-button";
 
 export const dynamic = "force-dynamic";
 
 // The connectors row is stamped "online" at redeem and never flipped back by
-// the API; last_seen_at (refreshed on every command poll, default every 5s) is
-// the live signal. Treat an "online" connector whose last poll is older than
-// this as offline so the badge reflects reality.
+// the API; last_seen_at (refreshed while the command poll loop runs) is the
+// live signal. A connector with no live cameras goes dormant to let the
+// database suspend, so it reads as offline here — use Wake to bring it back.
+// Treat an "online" connector whose last poll is older than this as offline so
+// the badge reflects reality.
 const ONLINE_STALE_MS = 90_000;
 
 function effectiveStatus(c: Connector): ConnectorStatus {
@@ -91,7 +94,10 @@ export default async function SiteConnectorsPage({ params }: { params: { id: str
               ? `Last seen ${new Date(c.lastSeenAt).toLocaleString()}`
               : "Never seen"}
           </div>
-          <StatusBadge status={effectiveStatus(c)} />
+          <div style={{ display: "flex", alignItems: "center", gap: 12, justifyContent: "flex-end" }}>
+            <StatusBadge status={effectiveStatus(c)} />
+            {effectiveStatus(c) === "offline" && <WakeConnectorButton connectorId={c.id} />}
+          </div>
         </div>
       ))}
     </div>

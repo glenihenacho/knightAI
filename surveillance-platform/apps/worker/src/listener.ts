@@ -11,16 +11,44 @@ export interface ListenerHandlers {
   onNotification(channel: string, payload: string): void;
 }
 
+export interface ReconnectPolicy {
+  // Delay before reconnecting while the pipeline is active (segments flowing).
+  activeMs: number;
+  // Delay before reconnecting while idle. Kept past Neon's suspend window so a
+  // dropped connection doesn't immediately wake the compute back up.
+  idleMs: number;
+  // No NOTIFY for this long ⇒ idle.
+  idleAfterMs: number;
+}
+
+const DEFAULT_POLICY: ReconnectPolicy = {
+  activeMs: 1_000,
+  idleMs: 300_000,
+  idleAfterMs: 60_000,
+};
+
 export class PgListener {
   private client: pg.Client | null = null;
   private stopped = false;
+  private lastNotificationAt = 0;
+  private readonly policy: ReconnectPolicy;
 
   constructor(
     private readonly databaseUrl: string,
     private readonly channels: string[],
     private readonly handlers: ListenerHandlers,
     private readonly log: Logger,
-  ) {}
+    policy: Partial<ReconnectPolicy> = {},
+  ) {
+    this.policy = { ...DEFAULT_POLICY, ...policy };
+  }
+
+  // Reconnect fast while work is flowing; back off when idle so Neon can stay
+  // suspended instead of being woken every second by a reconnect.
+  private reconnectDelayMs(): number {
+    const idle = Date.now() - this.lastNotificationAt > this.policy.idleAfterMs;
+    return idle ? this.policy.idleMs : this.policy.activeMs;
+  }
 
   async start(): Promise<void> {
     await this.connect();
@@ -31,6 +59,7 @@ export class PgListener {
     const client = new pg.Client({ connectionString: this.databaseUrl });
     this.client = client;
     client.on("notification", (msg) => {
+      this.lastNotificationAt = Date.now();
       this.handlers.onNotification(msg.channel, msg.payload ?? "");
     });
     client.on("error", (err) => {
@@ -38,8 +67,9 @@ export class PgListener {
     });
     client.on("end", () => {
       if (this.stopped) return;
-      this.log.warn("listener disconnected, reconnecting in 1s");
-      setTimeout(() => void this.connect().catch(() => this.scheduleRetry()), 1000);
+      const delay = this.reconnectDelayMs();
+      this.log.warn({ delayMs: delay }, "listener disconnected, reconnecting");
+      setTimeout(() => void this.connect().catch(() => this.scheduleRetry()), delay);
     });
     try {
       await client.connect();
@@ -55,7 +85,7 @@ export class PgListener {
 
   private scheduleRetry(): void {
     if (this.stopped) return;
-    setTimeout(() => void this.connect().catch(() => this.scheduleRetry()), 2000);
+    setTimeout(() => void this.connect().catch(() => this.scheduleRetry()), this.reconnectDelayMs());
   }
 
   async stop(): Promise<void> {

@@ -44,6 +44,11 @@ async function main() {
       },
     },
     log,
+    {
+      activeMs: env.LISTENER_ACTIVE_RECONNECT_MS,
+      idleMs: env.LISTENER_IDLE_RECONNECT_MS,
+      idleAfterMs: env.LISTENER_IDLE_AFTER_MS,
+    },
   );
   await listener.start();
 

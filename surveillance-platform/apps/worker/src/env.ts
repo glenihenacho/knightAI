@@ -49,6 +49,18 @@ const EnvSchema = z.object({
   MAX_QUEUE_PER_CAMERA: z.coerce.number().int().positive().default(5),
 
   METRICS_PORT: z.coerce.number().int().positive().default(9100),
+
+  // Reconnect cadence for the Postgres LISTEN connection. While segments are
+  // flowing the connection drops should heal fast (1s). When idle, Neon
+  // suspends the compute and drops the connection; reconnecting right away
+  // would immediately wake it again, so back off past the suspend window. The
+  // cost is detection cold-start: after idle, the first segments can wait up
+  // to this long before the worker is listening again.
+  LISTENER_ACTIVE_RECONNECT_MS: z.coerce.number().int().positive().default(1_000),
+  LISTENER_IDLE_RECONNECT_MS: z.coerce.number().int().positive().default(300_000),
+  // No NOTIFY for this long ⇒ treat the pipeline as idle (segments arrive
+  // every ~2s while a camera streams, so a minute of silence is decisive).
+  LISTENER_IDLE_AFTER_MS: z.coerce.number().int().positive().default(60_000),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

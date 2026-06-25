@@ -25,6 +25,16 @@ import type {
   Zone,
 } from "@surveillance/shared";
 import { getPool, withTx } from "./client.js";
+import { markDetectionDirty } from "../detection.js";
+import { rememberConnectorToken, requestConnectorWake } from "../connector-wake.js";
+
+// A connector polls every CONNECTOR_POLL_INTERVAL_MS (default 5s). Writing
+// last_seen_at on every poll is ~17k writes/day per connector and keeps Neon
+// awake. The dashboard treats a connector with no poll for ONLINE_STALE_MS
+// (90s) as offline, so refreshing every CONNECTOR_SEEN_REFRESH_MS keeps the
+// badge accurate while cutting the write rate ~6x.
+const CONNECTOR_ONLINE_STALE_MS = 90_000;
+const CONNECTOR_SEEN_REFRESH_MS = 30_000;
 
 export interface PairingRecord {
   id: string;
@@ -1213,7 +1223,17 @@ export function createStore(databaseUrl: string): Store {
       if (!row) return null;
       if (row.status === "revoked") return null;
       if (!compareTokenHash(token, row.token_hash)) return null;
-      await pool.query("UPDATE connectors SET last_seen_at = now() WHERE id = $1", [connectorId]);
+      // Let wake-check authenticate this connector without a DB round-trip.
+      rememberConnectorToken(connectorId, row.token_hash);
+      const lastSeenMs = row.last_seen_at ? row.last_seen_at.getTime() : 0;
+      const age = Date.now() - lastSeenMs;
+      // Reconnect after being offline: a camera on this connector may now have
+      // a deliverable detection pipeline, so wake the supervisor.
+      if (age > CONNECTOR_ONLINE_STALE_MS) markDetectionDirty();
+      // Throttle the heartbeat write so a 5s poll loop doesn't pin Neon awake.
+      if (age > CONNECTOR_SEEN_REFRESH_MS) {
+        await pool.query("UPDATE connectors SET last_seen_at = now() WHERE id = $1", [connectorId]);
+      }
       return rowToConnector(row);
     },
 
@@ -1305,6 +1325,9 @@ export function createStore(databaseUrl: string): Store {
           WHERE id = $1`,
         [input.id, input.state, input.lastValidatedAt, input.lastSnapshotKey, input.errorMessage],
       );
+      // A camera flipping to online can become a detection target; wake the
+      // supervisor so it doesn't sit idle waiting for the next tick to notice.
+      if (input.state === "online") markDetectionDirty();
     },
 
     async enqueueCommand(connectorId, command, cameraId) {
@@ -1313,6 +1336,9 @@ export function createStore(databaseUrl: string): Store {
          VALUES ($1, $2, $3, $4, $5, 'queued', $6)`,
         [command.id, connectorId, cameraId, command.kind, command.payload, command.issuedAt],
       );
+      // Wake a dormant connector so it picks the command up promptly instead of
+      // waiting out its next wake-check interval.
+      requestConnectorWake(connectorId);
     },
 
     async takeNextCommand(connectorId) {
@@ -1383,6 +1409,10 @@ export function createStore(databaseUrl: string): Store {
                    started_at, last_heartbeat_at, ended_at, error_message`,
         [cameraId, maxDurationSeconds, startedBy],
       );
+      // An operator preview feeds the same segments the worker consumes, so
+      // detection can ride it instead of opening a second RTSP pull. Wake the
+      // supervisor so it reconciles against this new live pipeline.
+      if (startedBy === "operator") markDetectionDirty();
       return rowToPreview(rows[0]!);
     },
 

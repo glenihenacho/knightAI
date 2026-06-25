@@ -74,6 +74,12 @@ impl PreviewManager {
         }
     }
 
+    /// Number of live preview/detection sessions. Zero means the connector has
+    /// no camera streaming, so the poller may go dormant.
+    pub fn active_count(&self) -> usize {
+        self.sessions.lock().len()
+    }
+
     pub async fn start(
         &self,
         identity: &ConnectorIdentity,
