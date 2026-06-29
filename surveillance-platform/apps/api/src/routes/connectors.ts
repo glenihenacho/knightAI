@@ -3,12 +3,27 @@ import { randomUUID } from "node:crypto";
 import { DiscoverOnvifPayloadSchema, type Command } from "@surveillance/shared";
 import type { Store } from "../db/store.js";
 import { requireOperator } from "../auth.js";
+import { requestConnectorWake } from "../connector-wake.js";
 
 export function registerConnectorRoutes(app: FastifyInstance, store: Store): void {
   app.get("/v1/connectors", async (req, reply) => {
     const user = await requireOperator(req, reply, store);
     if (!user) return;
     return { connectors: await store.listConnectorsForOrg(user.organizationId) };
+  });
+
+  // Explicitly wake a dormant connector. A connector with no live cameras goes
+  // dormant (it stops the DB-backed poll loop so Neon can suspend) and waits for
+  // a wake before it accepts new commands. Most operator actions wake it
+  // implicitly by queuing a command; this is the manual "bring it back" button.
+  app.post("/v1/connectors/:connectorId/wake", async (req, reply) => {
+    const user = await requireOperator(req, reply, store);
+    if (!user) return;
+    const { connectorId } = req.params as { connectorId: string };
+    const connector = await store.getConnectorForOrg(connectorId, user.organizationId);
+    if (!connector) return reply.code(404).send({ error: "connector not found" });
+    requestConnectorWake(connectorId);
+    return reply.code(202).send({ ok: true });
   });
 
   // Kick off an ONVIF LAN scan on a connector. Fire-and-forget: the connector

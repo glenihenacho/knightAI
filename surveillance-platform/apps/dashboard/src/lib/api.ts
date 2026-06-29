@@ -237,6 +237,12 @@ export const api = {
       },
     ),
 
+  wakeConnector: (connectorId: string) =>
+    call<{ ok: boolean }>(
+      `/v1/connectors/${encodeURIComponent(connectorId)}/wake`,
+      { method: "POST" },
+    ),
+
   getDiscovery: (connectorId: string, commandId: string) =>
     call<{ status: string; devices: OnvifDevice[]; errorMessage: string | null }>(
       `/v1/connectors/${encodeURIComponent(connectorId)}/discoveries/${encodeURIComponent(
