@@ -17,7 +17,20 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time::{timeout, Instant};
 
-const MULTICAST_ENDPOINT: &str = "239.255.255.250:3702";
+// The IANA-assigned WS-Discovery group: real ONVIF cameras listen here.
+const DEFAULT_DISCOVERY_ENDPOINT: &str = "239.255.255.250:3702";
+
+/// Where the Probe is sent. Defaults to the real multicast group; an operator
+/// can point it at a unicast `host:port` via `ONVIF_DISCOVERY_ENDPOINT` to run
+/// discovery against a local simulator (see tools/onvif-sim.ts) with no cameras
+/// on the LAN. An empty/unset value keeps the production multicast behaviour.
+fn discovery_endpoint() -> String {
+    std::env::var("ONVIF_DISCOVERY_ENDPOINT")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_DISCOVERY_ENDPOINT.to_string())
+}
 
 #[derive(Serialize, Clone)]
 pub struct OnvifDevice {
@@ -48,10 +61,11 @@ pub async fn discover(timeout_ms: u64) -> Result<DiscoverResult> {
 
     let message_id = format!("urn:uuid:{}", uuid::Uuid::new_v4());
     let probe = probe_envelope(&message_id);
+    let endpoint = discovery_endpoint();
     socket
-        .send_to(probe.as_bytes(), MULTICAST_ENDPOINT)
+        .send_to(probe.as_bytes(), endpoint.as_str())
         .await
-        .map_err(|e| anyhow!("send probe: {e}"))?;
+        .map_err(|e| anyhow!("send probe to {endpoint}: {e}"))?;
 
     let budget = Duration::from_millis(timeout_ms.clamp(1_000, 15_000));
     let start = Instant::now();
