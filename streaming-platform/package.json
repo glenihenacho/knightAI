@@ -1,0 +1,27 @@
+{
+  "name": "streaming-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "KnightStream — a Twitch-style live platform that aggregates consented streams from Twitch, Kick, YouTube, Instagram & TikTok Live",
+  "packageManager": "pnpm@10.0.0",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "clean": "turbo run clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.7.0",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0"
+  },
+  "engines": {
+    "node": ">=20.10",
+    "pnpm": ">=9"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["better-sqlite3", "esbuild", "sharp"]
+  }
+}

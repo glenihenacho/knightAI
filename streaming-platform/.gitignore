@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.next/
+.turbo/
+*.tsbuildinfo
+
+# Local data + secrets
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+data/
+.env
+.env.local
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
